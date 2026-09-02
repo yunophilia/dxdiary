@@ -30,6 +30,17 @@ impl GitRepo {
         self.repo.workdir()
     }
 
+    /// Raw handle, for the sibling modules in this crate. Nothing outside
+    /// `crowsnest-vcs` may reach gix.
+    pub(crate) fn repo(&self) -> &gix::Repository {
+        &self.repo
+    }
+
+    /// Repository-relative form of `path`. See [`GitRepo::relative`].
+    pub(crate) fn relative_path(&self, path: &Path) -> PathBuf {
+        self.relative(path)
+    }
+
     fn tree_of(&self, rev: &str) -> Result<gix::Tree<'_>> {
         let id = self
             .repo

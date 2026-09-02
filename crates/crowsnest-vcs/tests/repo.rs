@@ -42,9 +42,21 @@ fn repo(tag: &str) -> PathBuf {
     // `git init --initial-branch` needs 2.28; this works on every version and
     // is valid before the first commit exists.
     git(&dir, &["symbolic-ref", "HEAD", "refs/heads/main"]);
-    git(&dir, &["config", "user.email", "test@example.com"]);
-    git(&dir, &["config", "user.name", "Test"]);
-    git(&dir, &["config", "commit.gpgsign", "false"]);
+    // `author.*` and `committer.*` are pinned as well as `user.*`: they take
+    // precedence over `user.name` for their respective fields, so a developer
+    // with those set globally would otherwise leak their own identity into
+    // these fixtures.
+    for (key, value) in [
+        ("user.name", "Test"),
+        ("user.email", "test@example.com"),
+        ("author.name", "Test"),
+        ("author.email", "test@example.com"),
+        ("committer.name", "Test"),
+        ("committer.email", "test@example.com"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(&dir, &["config", key, value]);
+    }
 
     write(&dir, "README.md", "hello\n");
     write(&dir, "src/main.rs", "fn main() {}\n");
@@ -393,4 +405,94 @@ fn an_unchanged_file_has_no_hunks() {
         .file_diff(Path::new("README.md"), &DiffBaseline::Head)
         .unwrap();
     assert!(d.is_empty());
+}
+
+// --------------------------------------------------------------- blame ---
+
+#[test]
+fn blame_attributes_each_line_to_the_commit_that_introduced_it() {
+    let dir = repo("blame-basic");
+    write(&dir, "poem.txt", "first\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "--quiet", "-m", "one"]);
+
+    write(&dir, "poem.txt", "first\nsecond\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "--quiet", "-m", "two"]);
+
+    let vcs = GitRepo::open(&dir).unwrap();
+    let blame = vcs.blame(Path::new("poem.txt")).unwrap();
+
+    assert_eq!(blame.lines.len(), 2);
+    assert_ne!(
+        blame.get(0).unwrap().commit,
+        blame.get(1).unwrap().commit,
+        "the two lines came from different commits"
+    );
+    assert_eq!(blame.get(0).unwrap().summary, "one");
+    assert_eq!(blame.get(1).unwrap().summary, "two");
+}
+
+#[test]
+fn blame_records_the_author_and_a_relative_time() {
+    let dir = repo("blame-author");
+    let vcs = GitRepo::open(&dir).unwrap();
+    let blame = vcs.blame(Path::new("README.md")).unwrap();
+
+    let line = blame.get(0).unwrap();
+    assert_eq!(line.author, "Test", "the fixture pins author.name");
+    assert!(
+        line.when.ends_with("ago") || line.when == "just now",
+        "{:?}",
+        line.when
+    );
+    assert_eq!(line.commit.len(), 8, "abbreviated: {:?}", line.commit);
+}
+
+#[test]
+fn every_line_of_a_multi_line_hunk_is_covered() {
+    let dir = repo("blame-hunk");
+    write(&dir, "block.txt", "a\nb\nc\nd\ne\n");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "--quiet", "-m", "block"]);
+
+    let vcs = GitRepo::open(&dir).unwrap();
+    let blame = vcs.blame(Path::new("block.txt")).unwrap();
+
+    assert_eq!(blame.lines.len(), 5, "no gaps: {:#?}", blame.lines);
+    for (i, line) in blame.lines.iter().enumerate() {
+        assert_eq!(line.line, i, "line numbers are their own index");
+        assert!(!line.commit.is_empty());
+    }
+}
+
+#[test]
+fn blame_accepts_an_absolute_path() {
+    let dir = repo("blame-abs");
+    let vcs = GitRepo::open(&dir).unwrap();
+    assert!(!vcs.blame(&dir.join("README.md")).unwrap().is_empty());
+}
+
+#[test]
+fn blaming_a_file_that_is_not_tracked_fails_rather_than_lying() {
+    let dir = repo("blame-untracked");
+    write(&dir, "ghost.txt", "boo\n");
+
+    let vcs = GitRepo::open(&dir).unwrap();
+    assert!(
+        vcs.blame(Path::new("ghost.txt")).is_err(),
+        "an untracked file has no history to attribute"
+    );
+}
+
+#[test]
+fn blame_runs_off_thread_and_delivers_over_a_channel() {
+    let dir = repo("blame-async");
+    let rx = crowsnest_vcs::blame::spawn(dir.clone(), dir.join("README.md"));
+
+    let blame = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("worker delivered")
+        .expect("blame succeeded");
+    assert!(!blame.is_empty());
 }

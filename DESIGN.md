@@ -443,8 +443,24 @@ so roles are matched on the capture prefix rather than the full name.
 Client, registry, `doctor`. Rust first (cleanest), then Go/Python, then C/C++ with the
 two-source model.
 
-### Phase 5 — Blame
-Gutter, lazy compute, click-to-commit.
+### ~~Phase 5 — Blame~~ — **done**
+`crowsnest-vcs::blame` over `gix::blame`, rendered as a gutter toggled with `a`.
+
+Computed **on a background thread**, as §5 required: spike 0.3 measured 543 ms for a
+1,931-line file and 2.5 s for a 7,858-line one, and a commit-graph does not help. The
+keypress returns immediately and the event loop collects the result; a test asserts
+the blame is still absent right after the key, so a future refactor cannot quietly
+make it synchronous again.
+
+The worker opens its own repository handle — `gix::Repository` is `Send` but not
+`Sync`, which is why the `Vcs` trait requires only `Send`.
+
+Runs of lines from one commit show attribution on the first line only, as GitLens and
+`tig blame` do; repeating it down a whole function buries where authorship actually
+changes. Output was checked line-for-line against `git blame` on a two-author fixture.
+
+Click-to-commit is not implemented — it needs a commit-detail view that does not exist
+yet.
 
 ### Phase 6 — herdr plugin
 Manifest, context JSON, worktree binding, `worktree.created` hook, state persistence,

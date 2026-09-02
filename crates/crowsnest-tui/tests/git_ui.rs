@@ -28,6 +28,25 @@ fn git(dir: &Path, args: &[&str]) {
     );
 }
 
+/// Pin every identity key git consults.
+///
+/// `author.*` and `committer.*` override `user.*` for their own fields, so
+/// setting only `user.name` leaves these fixtures at the mercy of whatever the
+/// developer has configured globally.
+fn pin_identity(dir: &Path) {
+    for (key, value) in [
+        ("user.name", "T"),
+        ("user.email", "t@example.com"),
+        ("author.name", "T"),
+        ("author.email", "t@example.com"),
+        ("committer.name", "T"),
+        ("committer.email", "t@example.com"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(dir, &["config", key, value]);
+    }
+}
+
 fn write(dir: &Path, rel: &str, content: &str) {
     let path = dir.join(rel);
     if let Some(p) = path.parent() {
@@ -45,9 +64,7 @@ fn fixture(tag: &str) -> PathBuf {
 
     git(&dir, &["init", "--quiet"]);
     git(&dir, &["symbolic-ref", "HEAD", "refs/heads/main"]);
-    git(&dir, &["config", "user.email", "t@example.com"]);
-    git(&dir, &["config", "user.name", "T"]);
-    git(&dir, &["config", "commit.gpgsign", "false"]);
+    pin_identity(&dir);
 
     write(&dir, "clean.txt", "untouched\n");
     write(&dir, "edited.txt", "before\n");
@@ -299,9 +316,7 @@ fn diff_app(tag: &str) -> App {
 
     git(&root, &["init", "--quiet"]);
     git(&root, &["symbolic-ref", "HEAD", "refs/heads/main"]);
-    git(&root, &["config", "user.email", "t@example.com"]);
-    git(&root, &["config", "user.name", "T"]);
-    git(&root, &["config", "commit.gpgsign", "false"]);
+    pin_identity(&root);
 
     write(&root, "code.rs", "fn a() {}\nfn b() {}\nfn c() {}\n");
     git(&root, &["add", "."]);
@@ -396,9 +411,7 @@ fn the_whole_diff_is_reachable_by_scrolling() {
     std::fs::create_dir_all(&root).unwrap();
     git(&root, &["init", "--quiet"]);
     git(&root, &["symbolic-ref", "HEAD", "refs/heads/main"]);
-    git(&root, &["config", "user.email", "t@e.com"]);
-    git(&root, &["config", "user.name", "T"]);
-    git(&root, &["config", "commit.gpgsign", "false"]);
+    pin_identity(&root);
 
     // Far enough apart to make several separate hunks.
     let before: String = (1..=200).map(|n| format!("line {n}\n")).collect();
@@ -528,9 +541,7 @@ fn context_lines_in_a_diff_are_syntax_highlighted() {
     std::fs::create_dir_all(&root).unwrap();
     git(&root, &["init", "--quiet"]);
     git(&root, &["symbolic-ref", "HEAD", "refs/heads/main"]);
-    git(&root, &["config", "user.email", "t@e.com"]);
-    git(&root, &["config", "user.name", "T"]);
-    git(&root, &["config", "commit.gpgsign", "false"]);
+    pin_identity(&root);
 
     write(&root, "lib.rs", "fn keep() {}\nfn edit() { let a = 1; }\n");
     git(&root, &["add", "."]);
@@ -551,4 +562,159 @@ fn context_lines_in_a_diff_are_syntax_highlighted() {
         .to_color(crowsnest_core::ColorDepth::TrueColor);
     let colors = row_colors(&mut app, "fn keep");
     assert!(colors.contains(&want), "context line keeps syntax colour");
+}
+
+// --------------------------------------------------------------- blame ---
+
+/// Two commits by different authors, so runs and attribution are both visible.
+fn blame_app(tag: &str) -> App {
+    let root = std::env::temp_dir().join(format!("crowsnest-blame-{tag}"));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    git(&root, &["init", "--quiet"]);
+    git(&root, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    pin_identity(&root);
+
+    write(&root, "lib.rs", "fn one() {}\n");
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "--quiet", "-m", "add one"]);
+
+    // A second author, so a change of attribution is detectable.
+    git(&root, &["config", "author.name", "Other"]);
+    write(&root, "lib.rs", "fn one() {}\nfn two() {}\nfn three() {}\n");
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "--quiet", "-m", "add more"]);
+
+    let mut app = App::new(root.clone(), Config::default(), ColorDepth::TrueColor);
+    app.attach_vcs(Box::new(GitRepo::open(&root).unwrap()));
+    app.reveal_and_open(root.join("lib.rs"));
+    app
+}
+
+#[test]
+fn blame_is_off_until_asked_for() {
+    let app = blame_app("off");
+    assert!(!app.show_blame);
+    assert!(app.blame.is_none());
+}
+
+#[test]
+fn toggling_blame_computes_it_off_the_render_thread() {
+    let mut app = blame_app("async");
+
+    assert!(key(&mut app, KeyCode::Char('a')));
+    assert!(app.show_blame);
+    // The keypress must return immediately -- blame takes up to 2.5 s on a
+    // large file (spike 0.3) and cannot be allowed to block a frame.
+    assert!(app.blame.is_none(), "not computed synchronously");
+
+    assert!(
+        app.await_blame(std::time::Duration::from_secs(30)),
+        "the worker delivers"
+    );
+    assert!(app.blame.is_some());
+}
+
+#[test]
+fn the_gutter_shows_the_author_of_each_line() {
+    let mut app = blame_app("gutter");
+    key(&mut app, KeyCode::Char('a'));
+    app.await_blame(std::time::Duration::from_secs(30));
+
+    let screen = draw(&mut app);
+    assert!(screen.contains('T'), "first author present:\n{screen}");
+    assert!(screen.contains("Other"), "second author present:\n{screen}");
+    assert!(screen.contains("fn one()"), "source still shown:\n{screen}");
+}
+
+#[test]
+fn consecutive_lines_from_one_commit_are_not_repeated() {
+    let mut app = blame_app("runs");
+    key(&mut app, KeyCode::Char('a'));
+    app.await_blame(std::time::Duration::from_secs(30));
+
+    let blame = app.blame.as_ref().unwrap();
+    assert_eq!(
+        blame.get(1).unwrap().commit,
+        blame.get(2).unwrap().commit,
+        "lines 2 and 3 landed in the same commit"
+    );
+
+    let screen = draw(&mut app);
+    let third = screen
+        .lines()
+        .find(|l| l.contains("fn three()"))
+        .expect("third line rendered");
+    assert!(
+        !third.contains("Other"),
+        "a repeated commit is left blank: {third:?}"
+    );
+}
+
+#[test]
+fn blame_forces_the_file_view() {
+    let mut app = blame_app("view");
+    let root = app.tree.root.clone();
+    write(
+        &root,
+        "lib.rs",
+        "fn one() {}\nfn two() {}\nfn EDITED() {}\n",
+    );
+    key(&mut app, KeyCode::Char('r'));
+    app.reveal_and_open(root.join("lib.rs"));
+    assert_eq!(
+        app.view,
+        crowsnest_tui::ContentView::Diff,
+        "opens on the diff"
+    );
+
+    key(&mut app, KeyCode::Char('a'));
+    assert_eq!(
+        app.view,
+        crowsnest_tui::ContentView::File,
+        "the diff has no blame gutter, so blame switches views"
+    );
+}
+
+#[test]
+fn opening_another_file_discards_the_previous_blame() {
+    let mut app = blame_app("switch");
+    key(&mut app, KeyCode::Char('a'));
+    app.await_blame(std::time::Duration::from_secs(30));
+    assert!(app.blame.is_some());
+
+    let root = app.tree.root.clone();
+    write(&root, "other.rs", "fn other() {}\n");
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "--quiet", "-m", "other"]);
+    key(&mut app, KeyCode::Char('r'));
+    app.reveal_and_open(root.join("other.rs"));
+
+    // Stale blame would attribute the wrong commits to the new file.
+    assert!(
+        app.blame.is_none() || app.blame.as_ref().unwrap().path.ends_with("other.rs"),
+        "no stale attribution"
+    );
+    assert!(app.await_blame(std::time::Duration::from_secs(30)));
+    assert!(app.blame.as_ref().unwrap().path.ends_with("other.rs"));
+}
+
+#[test]
+fn blame_outside_a_repository_reports_rather_than_panicking() {
+    let dir = std::env::temp_dir().join("crowsnest-blame-norepo");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a.txt"), "x\n").unwrap();
+
+    let mut app = App::new(dir.clone(), Config::default(), ColorDepth::TrueColor);
+    app.reveal_and_open(dir.join("a.txt"));
+
+    key(&mut app, KeyCode::Char('a'));
+    assert!(
+        app.status.contains("not a git repository"),
+        "{}",
+        app.status
+    );
+    assert!(!app.show_blame);
 }

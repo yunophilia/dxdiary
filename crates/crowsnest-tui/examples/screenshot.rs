@@ -47,6 +47,18 @@ fn main() -> anyhow::Result<()> {
         app.reveal_and_open(path);
     }
 
+    // `CROWSNEST_SHOT=blame` renders the blame gutter, waiting for the
+    // background worker the interactive loop would otherwise poll for.
+    if std::env::var("CROWSNEST_SHOT").as_deref() == Ok("blame") {
+        app.handle(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('a'),
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        ));
+        app.await_blame(std::time::Duration::from_secs(30));
+    }
+
     let mut term = Terminal::new(TestBackend::new(w, h))?;
     term.draw(|f| app.render(f))?;
 

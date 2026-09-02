@@ -75,6 +75,44 @@ impl Palette {
     }
 }
 
+/// Width of the blame gutter: `abcd1234 Author Name      3 days ago  `.
+const BLAME_WIDTH: usize = 34;
+
+/// One line's blame column.
+///
+/// Runs of lines from the same commit show the attribution only on the first,
+/// the way GitLens and `tig blame` do — repeating it down a whole function is
+/// noise that buries where authorship actually changes.
+fn blame_span(app: &App, line: usize, p: &Palette) -> Span<'static> {
+    let Some(blame) = &app.blame else {
+        return Span::raw(" ".repeat(BLAME_WIDTH));
+    };
+    let Some(entry) = blame.get(line) else {
+        return Span::raw(" ".repeat(BLAME_WIDTH));
+    };
+
+    let same_as_previous = line
+        .checked_sub(1)
+        .and_then(|prev| blame.get(prev))
+        .is_some_and(|prev| prev.commit == entry.commit);
+
+    if same_as_previous {
+        return Span::raw(" ".repeat(BLAME_WIDTH));
+    }
+
+    // Truncate by characters: author names are not ASCII-only.
+    let author: String = entry.author.chars().take(16).collect();
+    let text = format!(
+        "{:<8} {:<16} {:>7} ",
+        entry.commit,
+        author,
+        entry.when.replace(" ago", "")
+    );
+    let text: String = text.chars().take(BLAME_WIDTH).collect();
+
+    Span::styled(text, Style::default().fg(p.gutter))
+}
+
 /// Colour for one syntax role.
 fn role_color(role: crowsnest_syntax::Role, p: &Palette) -> Color {
     use crowsnest_syntax::Role;
@@ -466,7 +504,15 @@ pub(crate) fn render_content(f: &mut Frame, area: Rect, app: &App, hits: &mut Hi
             // Gutter is sized to the real line count so it never reflows while
             // scrolling, which would make the text jitter sideways.
             let gutter = doc.line_count().max(1).to_string().len().max(3);
-            let text_width = (inner.width as usize).saturating_sub(gutter + 1);
+
+            // Blame column, when on and delivered. Fixed width for the same
+            // reason as the line numbers.
+            let blame_w = if app.show_blame && app.blame.is_some() {
+                BLAME_WIDTH
+            } else {
+                0
+            };
+            let text_width = (inner.width as usize).saturating_sub(gutter + 1 + blame_w);
 
             doc.lines()
                 .iter()
@@ -485,7 +531,11 @@ pub(crate) fn render_content(f: &mut Frame, area: Rect, app: &App, hits: &mut Hi
                     // Horizontal scrolling is by character, not byte: slicing a
                     // UTF-8 string by byte offset would panic mid-codepoint.
                     let base = Style::default().fg(p.fg);
-                    let mut spans = vec![number];
+                    let mut spans = Vec::new();
+                    if blame_w > 0 {
+                        spans.push(blame_span(app, n, &p));
+                    }
+                    spans.push(number);
                     match app.doc_spans.get(n) {
                         Some(s) => spans.extend(highlighted_spans(
                             &expanded,

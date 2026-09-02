@@ -52,6 +52,15 @@ pub struct App {
     /// Which of the two the content pane is showing.
     pub view: ContentView,
 
+    // --- blame ----------------------------------------------------------
+    /// Blame for the open file, once the worker delivers it.
+    pub blame: Option<crowsnest_vcs::Blame>,
+    /// Whether the blame gutter is shown (`a`).
+    pub show_blame: bool,
+    /// Pending result from the background thread. Blame takes up to 2.5 s
+    /// (spike 0.3), so it never runs on the render thread.
+    blame_rx: Option<std::sync::mpsc::Receiver<anyhow::Result<crowsnest_vcs::Blame>>>,
+
     // --- syntax ---------------------------------------------------------
     highlighter: crowsnest_syntax::Highlighter,
     /// Detected language of the open file, if it is one crowsnest knows.
@@ -107,6 +116,9 @@ impl App {
             doc_scroll_x: 0,
             diff: None,
             view: ContentView::File,
+            blame: None,
+            show_blame: false,
+            blame_rx: None,
             highlighter: crowsnest_syntax::Highlighter::new(),
             language: None,
             doc_spans: Vec::new(),
@@ -279,6 +291,10 @@ impl App {
                     dirty |= self.handle(event::read()?);
                 }
             }
+
+            // A background blame may have finished while we were blocked on
+            // input. Checking here rather than on a timer keeps idling silent.
+            dirty |= self.poll_blame();
         }
         Ok(())
     }
@@ -324,6 +340,7 @@ impl App {
             }
             KeyCode::Char('b') => self.cycle_baseline(),
             KeyCode::Char('d') => self.toggle_view(),
+            KeyCode::Char('a') => self.toggle_blame(),
             KeyCode::Char('c') => self.toggle_changed_only(),
             KeyCode::Char(']') => self.jump_changed(true),
             KeyCode::Char('[') => self.jump_changed(false),
@@ -502,8 +519,18 @@ impl App {
         self.doc_scroll_y = 0;
         self.doc_scroll_x = 0;
 
+        // Blame belongs to the previous file; a stale gutter would attribute
+        // the wrong commits to the new one.
+        self.blame = None;
+        self.blame_rx = None;
+
         self.highlight_doc(&path);
         self.load_diff(&path);
+
+        if self.show_blame {
+            let root = self.tree.root.clone();
+            self.blame_rx = Some(crowsnest_vcs::blame::spawn(root, path));
+        }
     }
 
     /// Syntax-highlight the open file.
@@ -584,6 +611,86 @@ impl App {
         self.doc_scroll_y = 0;
         self.doc_line = 0;
         true
+    }
+
+    /// Toggle the blame gutter (`a`, for annotate).
+    ///
+    /// Only meaningful in the file view: a diff already says which commit each
+    /// side came from, and a blame column beside it would be noise.
+    fn toggle_blame(&mut self) -> bool {
+        if self.vcs.is_none() {
+            self.status = "not a git repository".into();
+            return true;
+        }
+        let Some(doc) = &self.doc else {
+            self.status = "no file open".into();
+            return true;
+        };
+
+        self.show_blame = !self.show_blame;
+        if !self.show_blame {
+            self.status = "blame off".into();
+            return true;
+        }
+
+        // Showing blame forces the file view; the diff view has no gutter for it.
+        self.view = ContentView::File;
+
+        if self.blame.is_some() {
+            self.status = "blame on".into();
+            return true;
+        }
+
+        let path = doc.path().to_path_buf();
+        let root = self.tree.root.clone();
+        self.blame_rx = Some(crowsnest_vcs::blame::spawn(root, path));
+        self.status = "blaming…".into();
+        true
+    }
+
+    /// Collect a finished blame, if the worker has one.
+    ///
+    /// Called from the event loop rather than from `render`, so a slow blame
+    /// delays nothing — the file is already on screen. Public so tests and the
+    /// screenshot example can await the worker without a live event loop.
+    pub fn poll_blame(&mut self) -> bool {
+        let Some(rx) = &self.blame_rx else {
+            return false;
+        };
+        match rx.try_recv() {
+            Ok(Ok(blame)) => {
+                self.status = format!("blame · {} lines", blame.lines.len());
+                self.blame = Some(blame);
+                self.blame_rx = None;
+                true
+            }
+            Ok(Err(e)) => {
+                self.status = format!("blame failed: {e}");
+                self.show_blame = false;
+                self.blame_rx = None;
+                true
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.blame_rx = None;
+                false
+            }
+        }
+    }
+
+    /// Block until a pending blame arrives, or the deadline passes.
+    ///
+    /// For tests and batch rendering only — the interactive path polls instead,
+    /// precisely so that it never blocks.
+    pub fn await_blame(&mut self, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while self.blame_rx.is_some() && std::time::Instant::now() < deadline {
+            if self.poll_blame() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        self.blame.is_some()
     }
 
     /// Rows the content pane can scroll through, for the current view.
