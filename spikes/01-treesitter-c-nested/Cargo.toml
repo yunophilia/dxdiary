@@ -1,0 +1,11 @@
+[package]
+name = "spike-01-treesitter-c-nested"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tree-sitter = "0.26.12"
+tree-sitter-c = "0.24.2"
+
+# Standalone: not a member of the crowsnest workspace.
+[workspace]

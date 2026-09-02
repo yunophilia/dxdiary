@@ -1,0 +1,13 @@
+[package]
+name = "spike-03-gix-perf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gix = { version = "0.86.0", features = ["blame", "status", "dirwalk", "revision"] }
+
+[profile.release]
+debug = true
+
+# Standalone: not a member of the crowsnest workspace.
+[workspace]

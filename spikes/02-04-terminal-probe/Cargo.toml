@@ -1,0 +1,11 @@
+[package]
+name = "spike-terminal-probe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+crossterm = "0.29.0"
+ratatui = "0.30.2"
+
+# Standalone: not a member of the crowsnest workspace.
+[workspace]

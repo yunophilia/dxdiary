@@ -1,0 +1,13 @@
+[package]
+name = "crowsnest-tui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+crossterm = { workspace = true }
+crowsnest-core = { path = "../crowsnest-core" }
+crowsnest-vcs = { path = "../crowsnest-vcs" }
+ratatui = { workspace = true }
+# poll(2), for the timed raw stdin reads in query.rs.
+libc = "0.2"

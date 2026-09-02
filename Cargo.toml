@@ -1,0 +1,31 @@
+[package]
+name = "crowsnest"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+description = "Terminal code viewer for reviewing agent work under version control"
+
+[workspace]
+members = ["crates/*"]
+# Spikes are standalone experiments with their own lockfiles, kept out of the
+# workspace by an empty [workspace] table in each of their manifests --
+# `exclude` does not accept globs.
+
+[workspace.dependencies]
+anyhow = "1"
+crossterm = "0.29"
+ratatui = "0.30"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+
+[dependencies]
+anyhow = { workspace = true }
+crossterm = { workspace = true }
+crowsnest-core = { path = "crates/crowsnest-core" }
+crowsnest-tui = { path = "crates/crowsnest-tui" }
+crowsnest-vcs = { path = "crates/crowsnest-vcs" }
+
+[profile.release]
+# Kept: panics in a raw-mode TUI need a readable backtrace, and the size cost
+# does not matter for a developer tool.
+debug = 1

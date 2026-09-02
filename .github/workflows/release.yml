@@ -1,0 +1,95 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # Fast feedback on the unit suite before spending time on the matrix.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  # Built from the same toolchain image developers use locally, so a CI
+  # artifact and a local build come out of the same container.
+  #
+  # Linux only -- see the Dockerfile for why there is no Windows target.
+  build:
+    needs: check
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      # On a Linux runner there is no VM boundary, so host bind mounts are
+      # fast and actions/cache can see them -- unlike the named volumes
+      # scripts/build.sh uses on Docker Desktop.
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/registry
+            .cache/target
+          key: ${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ matrix.target }}-
+
+      - name: Build toolchain image
+        run: docker build -t crowsnest-build .
+
+      - name: Build
+        run: |
+          mkdir -p .cache/registry .cache/target dist/${{ matrix.target }}
+          docker run --rm \
+            -v "$PWD:/app" \
+            -v "$PWD/.cache/target:/app/target" \
+            -v "$PWD/.cache/registry:/usr/local/cargo/registry" \
+            -v "$PWD/dist:/dist" \
+            crowsnest-build \
+            bash -c "
+              cargo build --release --locked --target ${{ matrix.target }}
+              cp target/${{ matrix.target }}/release/crowsnest /dist/${{ matrix.target }}/
+            "
+
+      - name: Package
+        run: |
+          tar czf crowsnest-${{ matrix.target }}.tar.gz \
+            -C dist/${{ matrix.target }} crowsnest
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crowsnest-${{ matrix.target }}
+          path: crowsnest-${{ matrix.target }}.tar.gz
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
