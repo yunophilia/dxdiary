@@ -445,12 +445,17 @@ pub(crate) fn render_content(f: &mut Frame, area: Rect, app: &App, hits: &mut Hi
     };
     // The title says which view you are in, because the two can look similar
     // at a glance on a file that is mostly context.
+    let dirty = if app.is_dirty() { " ●" } else { "" };
+    let mode = match app.mode {
+        crate::app::Mode::Insert => "  INSERT",
+        crate::app::Mode::Normal => "",
+    };
     let title = match (app.view, &app.diff) {
         (crate::app::ContentView::Diff, Some(d)) => {
-            format!("{name}  diff · {}", d.summary())
+            format!("{name}{dirty}  diff · {}", d.summary())
         }
-        (_, Some(_)) => format!("{name}  file · d for diff"),
-        _ => name,
+        (_, Some(_)) => format!("{name}{dirty}{mode}  file · d for diff"),
+        _ => format!("{name}{dirty}{mode}"),
     };
 
     let block = frame(app, PaneId::Content, &title, &p);
@@ -501,9 +506,13 @@ pub(crate) fn render_content(f: &mut Frame, area: Rect, app: &App, hits: &mut Hi
         ))],
         Some(Document::Text(doc)) => {
             let height = inner.height as usize;
+            // The buffer is the source of truth once a file is open; `doc` is
+            // only a fallback for the moment before it exists.
+            let owned = app.view_lines();
+            let lines: &[String] = owned.as_deref().unwrap_or_else(|| doc.lines());
             // Gutter is sized to the real line count so it never reflows while
             // scrolling, which would make the text jitter sideways.
-            let gutter = doc.line_count().max(1).to_string().len().max(3);
+            let gutter = lines.len().max(1).to_string().len().max(3);
 
             // Blame column, when on and delivered. Fixed width for the same
             // reason as the line numbers.
@@ -515,7 +524,7 @@ pub(crate) fn render_content(f: &mut Frame, area: Rect, app: &App, hits: &mut Hi
             // +1 for the line number's trailing space, +1 for the severity column.
             let text_width = (inner.width as usize).saturating_sub(gutter + 2 + blame_w);
 
-            doc.lines()
+            lines
                 .iter()
                 .enumerate()
                 .skip(app.doc_scroll_y)

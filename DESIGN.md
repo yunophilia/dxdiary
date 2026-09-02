@@ -496,11 +496,35 @@ Per-worktree state is keyed on a hash of the **full** worktree path, not its bas
 two crewmates working on `feature` under different parents would otherwise collide and
 send you to the wrong file.
 
-### Phase 7 — Editing (optional, decide later)
-Rope mutation, undo tree, save, LSP `didChange`, completion, staging hunks from the
-diff pane.
+### ~~Phase 7 — Editing~~ — **done**
+Rope-backed buffer (`crowsnest-core::buffer`), grouped undo/redo, modal editing, and
+an atomic save. `i` enters insert, `Esc` leaves, `u`/`Ctrl+R` undo and redo, `x` and
+`D` delete a character and a line, `Ctrl+S` writes.
 
----
+**Modal, not always-insert.** crowsnest is a reviewer first: `d`, `b`, `c`, and `a`
+are single-key commands, and making them all modifiers to free the alphabet would be
+the wrong trade for the common case. `Ctrl+C` quits from either mode, so a session is
+always escapable.
+
+**Undo is grouped by pause, not per keystroke.** Typing a word and pressing undo
+removes the word. The clock is passed in rather than read inside the buffer, so the
+coalescing logic is testable rather than timing-dependent.
+
+**The buffer is the single source of truth** for text once a file is open. `Document`
+keeps the non-text cases and the path; rendering reads the buffer, so an edit is
+visible immediately and there is never a second copy to drift.
+
+**Save writes a sibling temp file and renames.** An interrupted save cannot leave a
+truncated source file behind, and rename within a directory is atomic everywhere
+crowsnest runs.
+
+A goal column is preserved across short lines — moving down through a short line and
+back returns to the original column, which is the thing naive implementations get
+wrong.
+
+**Known gap: no LSP `didChange`.** Diagnostics are cleared on edit rather than shown
+against shifted lines, and refresh on save. Incremental document sync is the honest
+next step if editing becomes the primary use.
 
 ## 9. Risks
 

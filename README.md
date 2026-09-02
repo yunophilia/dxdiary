@@ -8,10 +8,10 @@ Built to sit alongside [firstmate](https://github.com/kunchenguid/firstmate), wh
 dispatches each crewmate into its own git worktree. crowsnest binds to that worktree
 and follows the fleet.
 
-**Status: Phases 0-6 done.** Tree and content panes, mouse-clickable, themed, git-aware —
+**Status: all phases done.** Tree and content panes, mouse-clickable, themed, git-aware —
 status badges, branch and counts, baseline cycling with fork-point detection, a unified
 hunk view, tree-sitter syntax highlighting for C, C++, Go, Python, and Rust, and
-per-line blame, and LSP for all five languages. Editing is the last piece. See [DESIGN.md](DESIGN.md)
+per-line blame, and LSP for all five languages. Editing works too. See [DESIGN.md](DESIGN.md)
 for the plan and [spikes/FINDINGS.md](spikes/FINDINGS.md) for what the spikes settled.
 
 ```
@@ -40,6 +40,20 @@ cargo run -- /path/to/repo
 | `g` / `G` | top / bottom |
 | `r` | refresh tree and git state |
 | `q` / `esc` | quit |
+
+Editing:
+
+| | |
+|---|---|
+| `i` | insert mode · `esc` leaves |
+| `u` / `ctrl-r` | undo / redo |
+| `x` / `D` | delete character / line |
+| `ctrl-s` | save |
+| `ctrl-c` | quit from any mode |
+
+Undo groups by pause, so typing a word and undoing removes the word. `●` in the
+title means unsaved. Saving writes a temp file and renames, so an interrupted save
+cannot truncate your source.
 
 Git:
 

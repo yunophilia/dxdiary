@@ -718,3 +718,196 @@ fn blame_outside_a_repository_reports_rather_than_panicking() {
     );
     assert!(!app.show_blame);
 }
+
+// ------------------------------------------------------------- editing ---
+
+fn edit_app(tag: &str, body: &str) -> App {
+    let root = std::env::temp_dir().join(format!("crowsnest-edit-{tag}"));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    write(&root, "code.rs", body);
+
+    let mut app = App::new(root.clone(), Config::default(), ColorDepth::TrueColor);
+    app.reveal_and_open(root.join("code.rs"));
+    app
+}
+
+fn typed(app: &mut App, text: &str) {
+    for ch in text.chars() {
+        let code = if ch == '\n' {
+            KeyCode::Enter
+        } else {
+            KeyCode::Char(ch)
+        };
+        key(app, code);
+    }
+}
+
+#[test]
+fn opening_a_text_file_makes_it_editable() {
+    let app = edit_app("open", "fn main() {}\n");
+    assert!(app.buffer.is_some());
+    assert_eq!(app.mode, crowsnest_tui::Mode::Normal);
+    assert!(!app.is_dirty());
+}
+
+#[test]
+fn i_enters_insert_mode_and_esc_leaves_it() {
+    let mut app = edit_app("modes", "abc\n");
+    assert!(key(&mut app, KeyCode::Char('i')));
+    assert_eq!(app.mode, crowsnest_tui::Mode::Insert);
+
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.mode, crowsnest_tui::Mode::Normal);
+}
+
+#[test]
+fn esc_leaves_insert_rather_than_quitting() {
+    // In normal mode Esc quits; in insert it must not, or every typo would
+    // close the editor.
+    let mut app = edit_app("esc", "abc\n");
+    key(&mut app, KeyCode::Char('i'));
+    key(&mut app, KeyCode::Esc);
+    assert!(!app.quit, "Esc left insert mode instead of quitting");
+}
+
+#[test]
+fn typed_text_reaches_the_buffer_and_the_screen() {
+    let mut app = edit_app("typing", "\n");
+    key(&mut app, KeyCode::Char('i'));
+    typed(&mut app, "hello");
+
+    assert_eq!(app.buffer.as_ref().unwrap().line(0), "hello");
+    assert!(app.is_dirty());
+
+    let screen = draw(&mut app);
+    assert!(screen.contains("hello"), "edit is visible:\n{screen}");
+    assert!(screen.contains("INSERT"), "mode is shown:\n{screen}");
+    assert!(screen.contains('●'), "unsaved marker:\n{screen}");
+}
+
+#[test]
+fn a_letter_that_is_a_command_in_normal_mode_is_just_text_in_insert() {
+    // `d`, `a`, `b`, `c`, `u`, `x` are all commands; none may leak into typing.
+    let mut app = edit_app("letters", "\n");
+    key(&mut app, KeyCode::Char('i'));
+    typed(&mut app, "dabcux");
+    assert_eq!(app.buffer.as_ref().unwrap().line(0), "dabcux");
+}
+
+#[test]
+fn undo_and_redo_work_from_normal_mode() {
+    let mut app = edit_app("undo", "start\n");
+    key(&mut app, KeyCode::Char('i'));
+    typed(&mut app, "XY");
+    key(&mut app, KeyCode::Esc);
+    assert!(app.buffer.as_ref().unwrap().line(0).starts_with("XY"));
+
+    key(&mut app, KeyCode::Char('u'));
+    assert_eq!(app.buffer.as_ref().unwrap().line(0), "start");
+
+    // Ctrl+R redoes.
+    app.handle(Event::Key(KeyEvent {
+        code: KeyCode::Char('r'),
+        modifiers: KeyModifiers::CONTROL,
+        kind: KeyEventKind::Press,
+        state: crossterm::event::KeyEventState::NONE,
+    }));
+    assert!(app.buffer.as_ref().unwrap().line(0).starts_with("XY"));
+}
+
+#[test]
+fn x_deletes_a_character_and_shift_d_deletes_a_line() {
+    let mut app = edit_app("delete", "abc\nsecond\n");
+    key(&mut app, KeyCode::Char('x'));
+    assert_eq!(app.buffer.as_ref().unwrap().line(0), "bc");
+
+    key(&mut app, KeyCode::Char('D'));
+    assert_eq!(app.buffer.as_ref().unwrap().lines(), vec!["second"]);
+}
+
+#[test]
+fn ctrl_s_writes_the_file_and_clears_the_marker() {
+    let mut app = edit_app("save", "before\n");
+    key(&mut app, KeyCode::Char('i'));
+    typed(&mut app, "X");
+    key(&mut app, KeyCode::Esc);
+    assert!(app.is_dirty());
+
+    let path = app.buffer.as_ref().unwrap().path.clone();
+    app.handle(Event::Key(KeyEvent {
+        code: KeyCode::Char('s'),
+        modifiers: KeyModifiers::CONTROL,
+        kind: KeyEventKind::Press,
+        state: crossterm::event::KeyEventState::NONE,
+    }));
+
+    assert!(!app.is_dirty(), "{}", app.status);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "Xbefore\n");
+}
+
+#[test]
+fn editing_rehighlights_so_new_syntax_is_coloured() {
+    let mut app = edit_app("rehighlight", "let x = 1;\n");
+    let before: usize = app.doc_spans.iter().map(|l| l.len()).sum();
+
+    key(&mut app, KeyCode::Char('i'));
+    typed(&mut app, "\nfn added() {}");
+    key(&mut app, KeyCode::Esc);
+
+    let after: usize = app.doc_spans.iter().map(|l| l.len()).sum();
+    assert!(after > before, "new code got spans: {before} -> {after}");
+}
+
+#[test]
+fn insert_mode_switches_away_from_the_diff_view() {
+    // A diff is not editable; typing into one would have nowhere to go.
+    let root = std::env::temp_dir().join("crowsnest-edit-diffview");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    git(&root, &["init", "--quiet"]);
+    git(&root, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    pin_identity(&root);
+    write(&root, "a.rs", "fn a() {}\n");
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "--quiet", "-m", "init"]);
+    write(&root, "a.rs", "fn a() { /* edited */ }\n");
+
+    let mut app = App::new(root.clone(), Config::default(), ColorDepth::TrueColor);
+    app.attach_vcs(Box::new(GitRepo::open(&root).unwrap()));
+    app.reveal_and_open(root.join("a.rs"));
+    assert_eq!(app.view, crowsnest_tui::ContentView::Diff);
+
+    key(&mut app, KeyCode::Char('i'));
+    assert_eq!(app.view, crowsnest_tui::ContentView::File);
+    assert_eq!(app.mode, crowsnest_tui::Mode::Insert);
+}
+
+#[test]
+fn a_binary_file_is_not_editable() {
+    let root = std::env::temp_dir().join("crowsnest-edit-binary");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("blob.bin"), [0u8, 1, 2, 0]).unwrap();
+
+    let mut app = App::new(root.clone(), Config::default(), ColorDepth::TrueColor);
+    app.reveal_and_open(root.join("blob.bin"));
+    assert!(app.buffer.is_none());
+
+    key(&mut app, KeyCode::Char('i'));
+    assert_eq!(app.mode, crowsnest_tui::Mode::Normal);
+    assert!(app.status.contains("not editable"), "{}", app.status);
+}
+
+#[test]
+fn ctrl_c_quits_even_from_insert_mode() {
+    let mut app = edit_app("escape-hatch", "x\n");
+    key(&mut app, KeyCode::Char('i'));
+    app.handle(Event::Key(KeyEvent {
+        code: KeyCode::Char('c'),
+        modifiers: KeyModifiers::CONTROL,
+        kind: KeyEventKind::Press,
+        state: crossterm::event::KeyEventState::NONE,
+    }));
+    assert!(app.quit, "a runaway session must always be escapable");
+}

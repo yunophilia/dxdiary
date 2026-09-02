@@ -24,6 +24,17 @@ use crate::term::Tui;
 /// round trip, so idling must be silent.
 const POLL: Duration = Duration::from_millis(500);
 
+/// Editing mode.
+///
+/// Modal rather than always-insert: crowsnest is a reviewer first, and every
+/// single-key command (`d`, `b`, `c`, `a`) would otherwise have to move to a
+/// modifier. `i` enters insert, `Esc` leaves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Normal,
+    Insert,
+}
+
 /// What the content pane shows for the open file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContentView {
@@ -46,6 +57,11 @@ pub struct App {
     pub doc_line: usize,
     pub doc_scroll_y: usize,
     pub doc_scroll_x: usize,
+
+    /// Editable text for the open file. The single source of truth for content
+    /// once a text file is open; `doc` keeps the non-text cases and the path.
+    pub buffer: Option<crowsnest_core::Buffer>,
+    pub mode: Mode,
 
     /// Hunks for the open file against the current baseline, when it changed.
     pub diff: Option<crowsnest_vcs::FileDiff>,
@@ -124,6 +140,8 @@ impl App {
             doc_line: 0,
             doc_scroll_y: 0,
             doc_scroll_x: 0,
+            buffer: None,
+            mode: Mode::Normal,
             diff: None,
             view: ContentView::File,
             blame: None,
@@ -327,12 +345,112 @@ impl App {
     // ---------------------------------------------------------------- keys
 
     fn on_key(&mut self, k: KeyEvent) -> bool {
-        // Keyboard must remain sufficient on its own: spike 0.2 has not yet
-        // confirmed that herdr forwards mouse events into plugin panes, and if
-        // it does not, this is the only way to drive the app.
+        // Ctrl+C quits from any mode; checked before insert so a runaway
+        // session is always escapable.
         if k.modifiers.contains(KeyModifiers::CONTROL) && matches!(k.code, KeyCode::Char('c')) {
             self.quit = true;
             return true;
+        }
+        if self.mode == Mode::Insert {
+            return self.on_insert_key(k);
+        }
+        self.on_normal_key(k)
+    }
+
+    /// Keys while typing. Everything printable is text; only the editing
+    /// controls are special.
+    fn on_insert_key(&mut self, k: KeyEvent) -> bool {
+        let now = now_ms();
+        let Some(buf) = &mut self.buffer else {
+            self.mode = Mode::Normal;
+            return true;
+        };
+
+        match k.code {
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                self.status = "normal".into();
+            }
+            KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => {
+                buf.insert(&c.to_string(), now)
+            }
+            KeyCode::Enter => buf.insert(
+                "
+", now,
+            ),
+            KeyCode::Tab => buf.insert("	", now),
+            KeyCode::Backspace => buf.backspace(now),
+            KeyCode::Delete => buf.delete(now),
+            KeyCode::Left => buf.move_left(),
+            KeyCode::Right => buf.move_right(),
+            KeyCode::Up => buf.move_vertical(-1),
+            KeyCode::Down => buf.move_vertical(1),
+            KeyCode::Home => buf.move_line_start(),
+            KeyCode::End => buf.move_line_end(),
+            KeyCode::Char('s') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                return self.save();
+            }
+            _ => return false,
+        }
+        self.sync_after_edit();
+        true
+    }
+
+    /// Keep the view, highlighting, and the language server in step with an
+    /// edit. Re-highlighting the whole file per keystroke is fine at terminal
+    /// sizes and avoids an incremental-parse cache that could go stale.
+    fn sync_after_edit(&mut self) {
+        let Some(buf) = &self.buffer else { return };
+        self.doc_line = buf.cursor.line;
+
+        if let (Some(lang), Some(b)) = (self.language, &self.buffer) {
+            let text = b.text();
+            self.doc_spans = self.highlighter.highlight(lang, &text);
+
+            // Read-only LSP has no didChange, so the server's diagnostics are
+            // now stale. Clearing them is honest; showing markers against
+            // shifted lines would be worse than showing none.
+            if !self.diagnostics.is_empty() {
+                self.diagnostics.clear();
+            }
+        }
+        self.clamp_content();
+    }
+
+    /// Write the buffer to disk.
+    fn save(&mut self) -> bool {
+        let Some(buf) = &mut self.buffer else {
+            self.status = "nothing to save".into();
+            return true;
+        };
+        if !buf.dirty {
+            self.status = "no changes".into();
+            return true;
+        }
+        match buf.save() {
+            Ok(()) => {
+                let path = buf.path.clone();
+                self.status = format!("wrote {}", path.display());
+                // The file changed on disk, so git status and the diff are
+                // both stale.
+                self.refresh_git();
+                self.load_diff(&path);
+                self.notify_lsp_open(&path);
+            }
+            Err(e) => self.status = format!("save failed: {e}"),
+        }
+        true
+    }
+
+    fn on_normal_key(&mut self, k: KeyEvent) -> bool {
+        // Keyboard must remain sufficient on its own: mouse forwarding through
+        // herdr works (spike 0.2), but SSH into an unknown terminal may not.
+        if k.modifiers.contains(KeyModifiers::CONTROL) {
+            return match k.code {
+                KeyCode::Char('s') => self.save(),
+                KeyCode::Char('r') => self.redo(),
+                _ => false,
+            };
         }
 
         match k.code {
@@ -356,6 +474,10 @@ impl App {
             KeyCode::Char('b') => self.cycle_baseline(),
             KeyCode::Char('d') => self.toggle_view(),
             KeyCode::Char('a') => self.toggle_blame(),
+            KeyCode::Char('i') => self.enter_insert(),
+            KeyCode::Char('u') => self.undo(),
+            KeyCode::Char('x') => self.delete_char(),
+            KeyCode::Char('D') => self.delete_line(),
             KeyCode::Char('K') => self.request_hover(),
             KeyCode::Char('c') => self.toggle_changed_only(),
             KeyCode::Char(']') => self.jump_changed(true),
@@ -539,6 +661,23 @@ impl App {
         // the wrong commits to the new one.
         self.blame = None;
         self.blame_rx = None;
+
+        self.buffer = match &self.doc {
+            Some(Document::Text(d)) => Some(crowsnest_core::Buffer::from_str(
+                &path,
+                &(d.lines().join(
+                    "
+",
+                ) + if d.no_trailing_newline {
+                    ""
+                } else {
+                    "
+"
+                }),
+            )),
+            _ => None,
+        };
+        self.mode = Mode::Normal;
 
         self.highlight_doc(&path);
         self.load_diff(&path);
@@ -888,11 +1027,95 @@ impl App {
             })
     }
 
+    // ------------------------------------------------------------- editing
+
+    /// Enter insert mode (`i`).
+    fn enter_insert(&mut self) -> bool {
+        if self.buffer.is_none() {
+            self.status = "this file is not editable".into();
+            return true;
+        }
+        // Editing applies to the file, not to a diff of it.
+        self.view = ContentView::File;
+        self.focus = PaneId::Content;
+        self.mode = Mode::Insert;
+        if let Some(buf) = &mut self.buffer {
+            let line = self.doc_line;
+            buf.move_to(line, buf.cursor.column);
+        }
+        self.status = "-- INSERT --  esc to leave · ctrl-s save".into();
+        true
+    }
+
+    fn undo(&mut self) -> bool {
+        let Some(buf) = &mut self.buffer else {
+            return false;
+        };
+        self.status = if buf.undo() {
+            "undo".into()
+        } else {
+            "nothing to undo".into()
+        };
+        self.sync_after_edit();
+        true
+    }
+
+    fn redo(&mut self) -> bool {
+        let Some(buf) = &mut self.buffer else {
+            return false;
+        };
+        self.status = if buf.redo() {
+            "redo".into()
+        } else {
+            "nothing to redo".into()
+        };
+        self.sync_after_edit();
+        true
+    }
+
+    fn delete_char(&mut self) -> bool {
+        let Some(buf) = &mut self.buffer else {
+            return false;
+        };
+        let line = self.doc_line;
+        buf.move_to(line, buf.cursor.column);
+        buf.delete(now_ms());
+        self.sync_after_edit();
+        true
+    }
+
+    fn delete_line(&mut self) -> bool {
+        let Some(buf) = &mut self.buffer else {
+            return false;
+        };
+        let line = self.doc_line;
+        buf.move_to(line, 0);
+        buf.delete_line(now_ms());
+        self.sync_after_edit();
+        true
+    }
+
+    /// True when the open file has unsaved changes.
+    pub fn is_dirty(&self) -> bool {
+        self.buffer.as_ref().is_some_and(|b| b.dirty)
+    }
+
+    /// Lines to render in the file view — from the buffer when there is one,
+    /// so an edit is visible immediately and there is only ever one copy of
+    /// the text.
+    pub fn view_lines(&self) -> Option<Vec<String>> {
+        self.buffer.as_ref().map(|b| b.lines())
+    }
+
     /// Rows the content pane can scroll through, for the current view.
     pub fn content_rows(&self) -> usize {
         match (self.view, &self.diff) {
             (ContentView::Diff, Some(d)) => d.display_rows(),
-            _ => self.text_line_count(),
+            _ => self
+                .buffer
+                .as_ref()
+                .map(|b| b.line_count())
+                .unwrap_or_else(|| self.text_line_count()),
         }
     }
 
@@ -1158,6 +1381,16 @@ fn hover_text(result: &serde_json::Value) -> Option<String> {
         .collect::<Vec<_>>()
         .join(" · ");
     (!flat.is_empty()).then_some(flat)
+}
+
+/// Milliseconds since process start, for undo coalescing.
+fn now_ms() -> u64 {
+    use std::sync::OnceLock;
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
 }
 
 fn inner_height(area: Rect) -> usize {
