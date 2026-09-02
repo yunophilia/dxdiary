@@ -28,6 +28,8 @@ crowsnest-tui = { path = "crates/crowsnest-tui" }
 crowsnest-vcs = { path = "crates/crowsnest-vcs" }
 
 [profile.release]
-# Kept: panics in a raw-mode TUI need a readable backtrace, and the size cost
-# does not matter for a developer tool.
-debug = 1
+# Line tables only, not full debug info. A panic in a raw-mode TUI still needs
+# a backtrace with file and line, but full DWARF took the binary to 85 MB --
+# which matters when the primary artifact is a static musl binary you scp onto
+# whatever box you are reviewing on.
+debug = "line-tables-only"
