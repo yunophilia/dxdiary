@@ -439,9 +439,25 @@ Four things worth knowing:
 Grammars disagree about capture names (Rust has no `number`; integers are `constant`),
 so roles are matched on the capture prefix rather than the full name.
 
-### Phase 4 — LSP
-Client, registry, `doctor`. Rust first (cleanest), then Go/Python, then C/C++ with the
-two-source model.
+### ~~Phase 4 — LSP~~ — **done**
+`crowsnest-lsp`: JSON-RPC over stdio, a server registry with `crowsnest --doctor`,
+and the C diagnostic filter from §2. Diagnostics show as a gutter marker; `K` asks
+for hover. Verified end to end against a real rust-analyzer, and against a mock
+server for everything a real one cannot be relied on to do.
+
+**No async runtime.** A reader thread feeds a channel and the UI polls — the same
+shape blame uses. Adding tokio for one subprocess would be a large dependency for no
+benefit in a synchronous event loop.
+
+**Read-only, so no `didChange`.** That removes incremental document sync, the
+fiddliest part of an LSP client, until editing actually needs it.
+
+**Presence on `PATH` is not availability.** `~/.cargo/bin/rust-analyzer` is a rustup
+*shim*: it exists, it is executable, and when the component is not installed it
+prints `Unknown binary` **to stderr and exits 0**. Neither the file test nor the exit
+code catches that. `registry::probe` runs `--version` and requires non-empty *stdout*,
+and `doctor` reports three states — ok, missing, and present-but-broken — with the
+command to fix each.
 
 ### ~~Phase 5 — Blame~~ — **done**
 `crowsnest-vcs::blame` over `gix::blame`, rendered as a gutter toggled with `a`.

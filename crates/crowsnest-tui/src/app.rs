@@ -61,6 +61,16 @@ pub struct App {
     /// (spike 0.3), so it never runs on the render thread.
     blame_rx: Option<std::sync::mpsc::Receiver<anyhow::Result<crowsnest_vcs::Blame>>>,
 
+    // --- lsp ------------------------------------------------------------
+    /// One server per language, started on first use and kept for the session.
+    lsp: std::collections::HashMap<crowsnest_syntax::Language, crowsnest_lsp::Client>,
+    /// Diagnostics for the open file, already filtered.
+    pub diagnostics: Vec<lsp_types::Diagnostic>,
+    /// What the C nested-function filter hid, if anything.
+    pub lsp_note: Option<String>,
+    /// Request id of an outstanding hover, so its reply can be recognised.
+    hover_id: Option<i64>,
+
     // --- syntax ---------------------------------------------------------
     highlighter: crowsnest_syntax::Highlighter,
     /// Detected language of the open file, if it is one crowsnest knows.
@@ -119,6 +129,10 @@ impl App {
             blame: None,
             show_blame: false,
             blame_rx: None,
+            lsp: std::collections::HashMap::new(),
+            diagnostics: Vec::new(),
+            lsp_note: None,
+            hover_id: None,
             highlighter: crowsnest_syntax::Highlighter::new(),
             language: None,
             doc_spans: Vec::new(),
@@ -295,6 +309,7 @@ impl App {
             // A background blame may have finished while we were blocked on
             // input. Checking here rather than on a timer keeps idling silent.
             dirty |= self.poll_blame();
+            dirty |= self.poll_lsp();
         }
         Ok(())
     }
@@ -341,6 +356,7 @@ impl App {
             KeyCode::Char('b') => self.cycle_baseline(),
             KeyCode::Char('d') => self.toggle_view(),
             KeyCode::Char('a') => self.toggle_blame(),
+            KeyCode::Char('K') => self.request_hover(),
             KeyCode::Char('c') => self.toggle_changed_only(),
             KeyCode::Char(']') => self.jump_changed(true),
             KeyCode::Char('[') => self.jump_changed(false),
@@ -526,6 +542,7 @@ impl App {
 
         self.highlight_doc(&path);
         self.load_diff(&path);
+        self.notify_lsp_open(&path);
 
         if self.show_blame {
             let root = self.tree.root.clone();
@@ -691,6 +708,184 @@ impl App {
             std::thread::sleep(Duration::from_millis(10));
         }
         self.blame.is_some()
+    }
+
+    // ----------------------------------------------------------------- lsp
+
+    /// Start (or reuse) a server for `lang` and tell it about the open file.
+    ///
+    /// A missing server is not an error: highlighting and outline come from
+    /// tree-sitter regardless, so the file stays fully usable.
+    fn notify_lsp_open(&mut self, path: &std::path::Path) {
+        self.diagnostics.clear();
+        self.lsp_note = None;
+
+        let Some(lang) = self.language else { return };
+        let Some(Document::Text(doc)) = &self.doc else {
+            return;
+        };
+        let text = doc.lines().join("\n");
+
+        if !self.lsp.contains_key(&lang) {
+            let Some(spec) = crowsnest_lsp::spec_for(lang) else {
+                return;
+            };
+            // Verify it runs, not just that it exists: a rustup shim is on
+            // PATH and executable even when the component was never installed.
+            if crowsnest_lsp::registry::find_on_path(spec.command).is_none() {
+                self.status = format!(
+                    "{} not installed — tree-sitter only (crowsnest --doctor)",
+                    spec.command
+                );
+                return;
+            }
+            if let Err(why) = crowsnest_lsp::registry::probe(spec.command) {
+                self.status = format!("{} does not run ({why}) — tree-sitter only", spec.command);
+                return;
+            }
+            match crowsnest_lsp::Client::spawn(spec, &self.tree.root) {
+                Ok(client) => {
+                    self.lsp.insert(lang, client);
+                }
+                Err(e) => {
+                    self.status = format!("{} failed to start: {e}", spec.command);
+                    return;
+                }
+            }
+        }
+
+        if let Some(client) = self.lsp.get(&lang) {
+            let _ = client.did_open(path, lang.name(), &text);
+        }
+    }
+
+    /// Collect anything the servers have sent.
+    ///
+    /// Polled from the event loop, never from `render`: a server can go quiet
+    /// for seconds and a frame must not wait on it. Public so tests and the
+    /// screenshot example can drive it without a live loop.
+    pub fn poll_lsp(&mut self) -> bool {
+        let Some(lang) = self.language else {
+            return false;
+        };
+        let Some(client) = self.lsp.get(&lang) else {
+            return false;
+        };
+
+        let open_uri = self
+            .doc
+            .as_ref()
+            .map(|d| crowsnest_lsp::path_to_uri(d.path()));
+
+        let mut dirty = false;
+        let mut incoming: Option<Vec<lsp_types::Diagnostic>> = None;
+        let mut hover: Option<String> = None;
+
+        while let Ok(event) = client.events.try_recv() {
+            match event {
+                crowsnest_lsp::Event::Diagnostics { uri, items } => {
+                    // Servers publish for every file they index; only the one
+                    // on screen is of interest.
+                    if open_uri.as_deref() == Some(uri.as_str()) {
+                        incoming = Some(items);
+                    }
+                }
+                crowsnest_lsp::Event::Response { id, result } if Some(id) == self.hover_id => {
+                    self.hover_id = None;
+                    hover = hover_text(&result);
+                    dirty = true;
+                }
+                crowsnest_lsp::Event::Error { id, message } if Some(id) == self.hover_id => {
+                    self.hover_id = None;
+                    self.status = format!("hover failed: {message}");
+                    dirty = true;
+                }
+                crowsnest_lsp::Event::Closed(why) => {
+                    self.status = format!("language server stopped: {why}");
+                    self.lsp.remove(&lang);
+                    dirty = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(items) = incoming {
+            // The C filter: clangd's output inside a function containing a GCC
+            // nested function is parse-recovery noise (DESIGN.md §2).
+            let source = match &self.doc {
+                Some(Document::Text(d)) => d.lines().join("\n"),
+                _ => String::new(),
+            };
+            let filtered = crowsnest_lsp::filter(lang, &source, items);
+            self.lsp_note = filtered.note();
+            self.diagnostics = filtered.kept;
+            if let Some(note) = &self.lsp_note {
+                self.status = note.clone();
+            }
+            dirty = true;
+        }
+
+        if let Some(text) = hover {
+            self.status = text;
+        }
+        dirty
+    }
+
+    /// Poll until diagnostics arrive for the open file, or the deadline passes.
+    ///
+    /// For tests and batch rendering only. A real server may index for seconds
+    /// before publishing anything, which is exactly why the interactive path
+    /// polls instead of waiting.
+    pub fn await_diagnostics(&mut self, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            self.poll_lsp();
+            if !self.diagnostics.is_empty() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    /// Ask for hover information at the cursor (`K`).
+    fn request_hover(&mut self) -> bool {
+        let Some(lang) = self.language else {
+            self.status = "no language detected for this file".into();
+            return true;
+        };
+        let Some(doc) = &self.doc else { return false };
+        let path = doc.path().to_path_buf();
+
+        let Some(client) = self.lsp.get(&lang) else {
+            self.status = "no language server for this file (crowsnest --doctor)".into();
+            return true;
+        };
+        match client.hover(&path, self.doc_line as u32, 0) {
+            Ok(id) => {
+                self.hover_id = Some(id);
+                self.status = "hover…".into();
+            }
+            Err(e) => self.status = format!("hover failed: {e}"),
+        }
+        true
+    }
+
+    /// Diagnostic severity marker for a line, for the gutter.
+    pub fn diagnostic_at(&self, line: usize) -> Option<lsp_types::DiagnosticSeverity> {
+        self.diagnostics
+            .iter()
+            .filter(|d| d.range.start.line as usize <= line && line <= d.range.end.line as usize)
+            .filter_map(|d| d.severity)
+            // Most severe wins the gutter. `DiagnosticSeverity` has no `Ord`
+            // and a private field, so rank explicitly.
+            .min_by_key(|s| match *s {
+                lsp_types::DiagnosticSeverity::ERROR => 0,
+                lsp_types::DiagnosticSeverity::WARNING => 1,
+                lsp_types::DiagnosticSeverity::INFORMATION => 2,
+                _ => 3,
+            })
     }
 
     /// Rows the content pane can scroll through, for the current view.
@@ -934,6 +1129,35 @@ impl App {
 
         self.hits = hits;
     }
+}
+
+/// Flatten an LSP hover reply into one status-bar line.
+///
+/// `contents` has three legal shapes across protocol versions, and servers in
+/// the wild use all of them.
+fn hover_text(result: &serde_json::Value) -> Option<String> {
+    let contents = result.get("contents")?;
+    let raw = if let Some(s) = contents.as_str() {
+        s.to_string()
+    } else if let Some(value) = contents.get("value").and_then(|v| v.as_str()) {
+        value.to_string()
+    } else {
+        contents
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|first| first.get("value"))
+            .and_then(|v| v.as_str())?
+            .to_string()
+    };
+
+    // The status bar is one line; markdown fences and blank lines are noise.
+    let flat = raw
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("```"))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    (!flat.is_empty()).then_some(flat)
 }
 
 fn inner_height(area: Rect) -> usize {

@@ -512,7 +512,8 @@ pub(crate) fn render_content(f: &mut Frame, area: Rect, app: &App, hits: &mut Hi
             } else {
                 0
             };
-            let text_width = (inner.width as usize).saturating_sub(gutter + 1 + blame_w);
+            // +1 for the line number's trailing space, +1 for the severity column.
+            let text_width = (inner.width as usize).saturating_sub(gutter + 2 + blame_w);
 
             doc.lines()
                 .iter()
@@ -528,6 +529,16 @@ pub(crate) fn render_content(f: &mut Frame, area: Rect, app: &App, hits: &mut Hi
                         Style::default().fg(if current { p.accent } else { p.gutter }),
                     );
 
+                    // One column for LSP severity, always reserved so text does
+                    // not shift as diagnostics arrive and clear.
+                    let (mark, mark_color) = match app.diagnostic_at(n) {
+                        Some(lsp_types::DiagnosticSeverity::ERROR) => ("✗", p.removed),
+                        Some(lsp_types::DiagnosticSeverity::WARNING) => ("!", p.warning),
+                        Some(_) => ("i", p.accent),
+                        None => (" ", p.gutter),
+                    };
+                    let severity = Span::styled(mark.to_string(), Style::default().fg(mark_color));
+
                     // Horizontal scrolling is by character, not byte: slicing a
                     // UTF-8 string by byte offset would panic mid-codepoint.
                     let base = Style::default().fg(p.fg);
@@ -535,6 +546,7 @@ pub(crate) fn render_content(f: &mut Frame, area: Rect, app: &App, hits: &mut Hi
                     if blame_w > 0 {
                         spans.push(blame_span(app, n, &p));
                     }
+                    spans.push(severity);
                     spans.push(number);
                     match app.doc_spans.get(n) {
                         Some(s) => spans.extend(highlighted_spans(

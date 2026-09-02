@@ -23,6 +23,7 @@ OPTIONS:
     -h, --help       Print this help
     -V, --version    Print version
         --caps       Report detected terminal capabilities and exit
+        --doctor     Report which language servers are installed and exit
 ";
 
 fn main() -> ExitCode {
@@ -82,6 +83,29 @@ fn report_caps() -> Result<()> {
     Ok(())
 }
 
+/// Report which language servers are installed.
+///
+/// crowsnest ships configuration, not binaries: vendoring clangd,
+/// rust-analyzer, and gopls would be hundreds of megabytes and a licensing
+/// tangle. This says what is missing and how to get it.
+fn report_doctor() -> Result<()> {
+    let statuses = crowsnest_lsp::doctor();
+    print!("{}", crowsnest_lsp::report(&statuses));
+
+    let missing = statuses.iter().filter(|s| !s.available()).count();
+    println!();
+    if missing == 0 {
+        println!("all {} language servers available", statuses.len());
+    } else {
+        println!(
+            "{missing} of {} missing — those languages fall back to tree-sitter \
+             (highlighting and outline still work)",
+            statuses.len()
+        );
+    }
+    Ok(())
+}
+
 fn run() -> Result<()> {
     let mut root: Option<PathBuf> = None;
 
@@ -96,6 +120,7 @@ fn run() -> Result<()> {
                 return Ok(());
             }
             "--caps" => return report_caps(),
+            "--doctor" => return report_doctor(),
             other if other.starts_with('-') => {
                 anyhow::bail!("unknown option {other:?}\n\n{USAGE}");
             }

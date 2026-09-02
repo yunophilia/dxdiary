@@ -59,6 +59,13 @@ fn main() -> anyhow::Result<()> {
         app.await_blame(std::time::Duration::from_secs(30));
     }
 
+    // `CROWSNEST_SHOT=lsp` waits for a language server to publish. Real servers
+    // index for seconds before saying anything, so a batch render needs to ask.
+    if std::env::var("CROWSNEST_SHOT").as_deref() == Ok("lsp") {
+        let got = app.await_diagnostics(std::time::Duration::from_secs(90));
+        eprintln!("diagnostics arrived: {got}");
+    }
+
     let mut term = Terminal::new(TestBackend::new(w, h))?;
     term.draw(|f| app.render(f))?;
 
