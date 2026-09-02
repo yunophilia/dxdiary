@@ -889,7 +889,7 @@ impl App {
     }
 
     /// Rows the content pane can scroll through, for the current view.
-    pub(crate) fn content_rows(&self) -> usize {
+    pub fn content_rows(&self) -> usize {
         match (self.view, &self.diff) {
             (ContentView::Diff, Some(d)) => d.display_rows(),
             _ => self.text_line_count(),

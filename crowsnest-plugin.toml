@@ -1,0 +1,53 @@
+# herdr plugin manifest.
+#
+#   herdr plugin link .          # develop against the working tree
+#   herdr plugin install <repo>  # or install from GitHub
+#
+# The binary must be on PATH; build it with ./scripts/build.sh and drop the
+# musl artifact somewhere on it.
+
+id = "crowsnest"
+name = "crowsnest"
+version = "0.1.0"
+description = "Review what the crew did: git status, fork-point diffs, blame, LSP"
+min_herdr_version = "0.8.0"
+
+# Linux only, deliberately -- see DESIGN.md §1. On Windows crowsnest runs under
+# WSL, which is Linux, so there is no Windows binary to declare.
+platforms = ["linux", "macos"]
+
+# A side pane beside the agent terminal, which is the whole point: read what
+# the crewmate wrote without leaving the multiplexer.
+[[panes]]
+id = "viewer"
+title = "crowsnest"
+placement = "split"
+command = ["crowsnest"]
+width = "45%"
+
+# Open the viewer over the whole window when a diff needs room.
+[[panes]]
+id = "zoomed"
+title = "crowsnest (zoomed)"
+placement = "zoomed"
+command = ["crowsnest"]
+
+[[actions]]
+id = "open"
+title = "Open crowsnest here"
+contexts = ["workspace"]
+command = ["crowsnest"]
+
+[[actions]]
+id = "doctor"
+title = "crowsnest: check language servers"
+contexts = ["workspace"]
+command = ["crowsnest", "--doctor"]
+
+# firstmate dispatches every crewmate into its own worktree. This is what makes
+# the viewer follow the fleet rather than needing to be pointed at each one:
+# herdr passes the new worktree in HERDR_PLUGIN_CONTEXT_JSON, and crowsnest
+# binds to it instead of trusting the inherited working directory.
+[[events]]
+on = "worktree.created"
+command = ["crowsnest", "--herdr-attach"]

@@ -478,9 +478,23 @@ changes. Output was checked line-for-line against `git blame` on a two-author fi
 Click-to-commit is not implemented — it needs a commit-detail view that does not exist
 yet.
 
-### Phase 6 — herdr plugin
-Manifest, context JSON, worktree binding, `worktree.created` hook, state persistence,
-`herdr plugin install`.
+### ~~Phase 6 — herdr plugin~~ — **done**
+`crowsnest-plugin.toml` declares a split pane, a zoomed pane, two actions, and a
+`worktree.created` hook. `crowsnest-herdr` reads `HERDR_PLUGIN_CONTEXT_JSON`.
+
+**The worktree overrides the working directory**, and that is the whole feature. A
+plugin pane inherits *herdr's* cwd, not the crewmate's, so trusting cwd would show the
+wrong tree. Verified by launching from `/tmp` with only the context JSON pointing at a
+worktree: crowsnest opened the worktree.
+
+The context parser tries `worktree`, `worktree_path`, and `cwd`, and accepts either a
+string or an object with a `path` — herdr has spelled it differently across versions,
+and a pane that silently fails to bind is worse than one that tries the likely keys.
+Malformed JSON degrades to "not bound" rather than failing to start.
+
+Per-worktree state is keyed on a hash of the **full** worktree path, not its basename:
+two crewmates working on `feature` under different parents would otherwise collide and
+send you to the wrong file.
 
 ### Phase 7 — Editing (optional, decide later)
 Rope mutation, undo tree, save, LSP `didChange`, completion, staging hunks from the

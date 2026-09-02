@@ -8,10 +8,10 @@ Built to sit alongside [firstmate](https://github.com/kunchenguid/firstmate), wh
 dispatches each crewmate into its own git worktree. crowsnest binds to that worktree
 and follows the fleet.
 
-**Status: Phases 0-5 done.** Tree and content panes, mouse-clickable, themed, git-aware —
+**Status: Phases 0-6 done.** Tree and content panes, mouse-clickable, themed, git-aware —
 status badges, branch and counts, baseline cycling with fork-point detection, a unified
 hunk view, tree-sitter syntax highlighting for C, C++, Go, Python, and Rust, and
-per-line blame, and LSP for all five languages. herdr packaging and editing are next. See [DESIGN.md](DESIGN.md)
+per-line blame, and LSP for all five languages. Editing is the last piece. See [DESIGN.md](DESIGN.md)
 for the plan and [spikes/FINDINGS.md](spikes/FINDINGS.md) for what the spikes settled.
 
 ```

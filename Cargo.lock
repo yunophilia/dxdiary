@@ -302,6 +302,7 @@ dependencies = [
  "anyhow",
  "crossterm",
  "crowsnest-core",
+ "crowsnest-herdr",
  "crowsnest-lsp",
  "crowsnest-tui",
  "crowsnest-vcs",
@@ -315,6 +316,15 @@ dependencies = [
  "ratatui",
  "serde",
  "toml",
+]
+
+[[package]]
+name = "crowsnest-herdr"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
