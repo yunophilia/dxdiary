@@ -97,6 +97,18 @@ pub struct Theme {
     pub added_bg: Rgb,
     pub removed_bg: Rgb,
     pub hunk_header: Rgb,
+    // --- syntax ---------------------------------------------------------
+    pub syn_keyword: Rgb,
+    pub syn_string: Rgb,
+    pub syn_comment: Rgb,
+    pub syn_function: Rgb,
+    pub syn_type: Rgb,
+    pub syn_number: Rgb,
+    pub syn_constant: Rgb,
+    pub syn_operator: Rgb,
+    pub syn_punctuation: Rgb,
+    pub syn_variable: Rgb,
+    pub syn_attribute: Rgb,
 }
 
 impl Default for Theme {
@@ -117,6 +129,17 @@ impl Default for Theme {
             added_bg: Rgb(0x1c, 0x28, 0x1c),
             removed_bg: Rgb(0x2c, 0x1c, 0x22),
             hunk_header: Rgb(0x7d, 0xcf, 0xff),
+            syn_keyword: Rgb(0xbb, 0x9a, 0xf7),
+            syn_string: Rgb(0x9e, 0xce, 0x6a),
+            syn_comment: Rgb(0x56, 0x5f, 0x89),
+            syn_function: Rgb(0x7a, 0xa2, 0xf7),
+            syn_type: Rgb(0x2a, 0xc3, 0xde),
+            syn_number: Rgb(0xff, 0x9e, 0x64),
+            syn_constant: Rgb(0xff, 0x9e, 0x64),
+            syn_operator: Rgb(0x89, 0xdd, 0xff),
+            syn_punctuation: Rgb(0x9a, 0xa5, 0xce),
+            syn_variable: Rgb(0xc0, 0xca, 0xf5),
+            syn_attribute: Rgb(0xe0, 0xaf, 0x68),
         }
     }
 }

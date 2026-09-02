@@ -417,9 +417,27 @@ Three things worth knowing:
   keeping the cursor visible is not enough on its own, because a pane that grows
   leaves a stale offset in place with blank rows stranded at the bottom.
 
-### Phase 3 — Syntax
-tree-sitter for the six languages, highlight themes, document outline, nested-function
-detection feeding §2's filter.
+### ~~Phase 3 — Syntax~~ — **done**
+`crowsnest-syntax`: tree-sitter for C, C++, Go, Python, and Rust; per-line character
+spans mapped to eleven theme roles; and the nested-function detector that §2's
+diagnostic filter needs. Both the file view and the diff view are highlighted.
+
+Four things worth knowing:
+
+- **The C++ query only covers C++-specific nodes.** The grammar is a superset of C
+  and its query assumes C's is prepended — without that, `int main() { return 0; }`
+  highlights nothing at all. `Language::highlight_query` concatenates them.
+- **Diff sides are highlighted as whole files, not line by line.** `FileDiff` carries
+  `old_text` and `new_text` for exactly this: highlighting a diff line in isolation
+  gets multi-line strings and block comments wrong, which is precisely the code a
+  reviewer is squinting at. The renderer looks spans up by each side's line number.
+- **Added and removed lines keep their diff colour**; only context lines take syntax
+  colour. The change is what the eye needs first.
+- Spans are in **characters, not bytes**, because horizontal scrolling slices by
+  character — byte offsets desynchronise on any non-ASCII line.
+
+Grammars disagree about capture names (Rust has no `number`; integers are `constant`),
+so roles are matched on the capture prefix rather than the full name.
 
 ### Phase 4 — LSP
 Client, registry, `doctor`. Rust first (cleanest), then Go/Python, then C/C++ with the

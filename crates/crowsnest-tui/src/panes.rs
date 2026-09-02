@@ -30,6 +30,17 @@ struct Palette {
     added_bg: Color,
     removed_bg: Color,
     hunk_header: Color,
+    syn_keyword: Color,
+    syn_string: Color,
+    syn_comment: Color,
+    syn_function: Color,
+    syn_type: Color,
+    syn_number: Color,
+    syn_constant: Color,
+    syn_operator: Color,
+    syn_punctuation: Color,
+    syn_variable: Color,
+    syn_attribute: Color,
 }
 
 impl Palette {
@@ -49,8 +60,97 @@ impl Palette {
             added_bg: theme.added_bg.to_color(depth),
             removed_bg: theme.removed_bg.to_color(depth),
             hunk_header: theme.hunk_header.to_color(depth),
+            syn_keyword: theme.syn_keyword.to_color(depth),
+            syn_string: theme.syn_string.to_color(depth),
+            syn_comment: theme.syn_comment.to_color(depth),
+            syn_function: theme.syn_function.to_color(depth),
+            syn_type: theme.syn_type.to_color(depth),
+            syn_number: theme.syn_number.to_color(depth),
+            syn_constant: theme.syn_constant.to_color(depth),
+            syn_operator: theme.syn_operator.to_color(depth),
+            syn_punctuation: theme.syn_punctuation.to_color(depth),
+            syn_variable: theme.syn_variable.to_color(depth),
+            syn_attribute: theme.syn_attribute.to_color(depth),
         }
     }
+}
+
+/// Colour for one syntax role.
+fn role_color(role: crowsnest_syntax::Role, p: &Palette) -> Color {
+    use crowsnest_syntax::Role;
+    match role {
+        Role::Keyword => p.syn_keyword,
+        Role::String => p.syn_string,
+        Role::Comment => p.syn_comment,
+        Role::Function => p.syn_function,
+        Role::Type => p.syn_type,
+        Role::Number => p.syn_number,
+        Role::Constant => p.syn_constant,
+        Role::Operator => p.syn_operator,
+        Role::Punctuation => p.syn_punctuation,
+        Role::Variable => p.syn_variable,
+        Role::Attribute => p.syn_attribute,
+        Role::Plain => p.fg,
+    }
+}
+
+/// Split one rendered line into spans coloured by its syntax highlights.
+///
+/// `spans` are in character offsets against the *untruncated* line, so the
+/// horizontal scroll window is applied here rather than by the caller — doing
+/// it beforehand would leave the offsets pointing at the wrong characters.
+fn highlighted_spans(
+    text: &str,
+    spans: &[crowsnest_syntax::Span],
+    scroll_x: usize,
+    width: usize,
+    base: Style,
+    p: &Palette,
+) -> Vec<Span<'static>> {
+    let chars: Vec<char> = text.chars().collect();
+    let end = chars.len().min(scroll_x.saturating_add(width));
+    if scroll_x >= chars.len() {
+        return vec![Span::styled(String::new(), base)];
+    }
+
+    // Per-character colour, then run-length encoded: simpler than interval
+    // arithmetic, and highlight spans can overlap when captures nest.
+    let mut colors: Vec<Option<Color>> = vec![None; chars.len()];
+    for s in spans {
+        let color = role_color(s.role, p);
+        for slot in colors
+            .iter_mut()
+            .take(s.end.min(chars.len()))
+            .skip(s.start.min(chars.len()))
+        {
+            *slot = Some(color);
+        }
+    }
+
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut run = String::new();
+    let mut run_color: Option<Color> = colors.get(scroll_x).copied().flatten();
+
+    for i in scroll_x..end {
+        let c = colors[i];
+        if c != run_color && !run.is_empty() {
+            out.push(Span::styled(
+                std::mem::take(&mut run),
+                run_color.map_or(base, |col| base.fg(col)),
+            ));
+            run_color = c;
+        } else if run.is_empty() {
+            run_color = c;
+        }
+        run.push(chars[i]);
+    }
+    if !run.is_empty() {
+        out.push(Span::styled(
+            run,
+            run_color.map_or(base, |col| base.fg(col)),
+        ));
+    }
+    out
 }
 
 /// Render hunks as a unified diff.
@@ -124,23 +224,46 @@ fn diff_lines<'a>(
             };
 
             let body = crowsnest_core::document::render_line(&line.text, app.config.tab_width);
-            let visible: String = body
-                .chars()
-                .skip(app.doc_scroll_x)
-                .take(width.saturating_sub(numw * 2 + 3))
-                .collect();
 
             let mut style = Style::default().fg(fg);
             if let Some(bg) = bg {
                 style = style.bg(bg);
             }
 
-            let spans = vec![
+            // Look highlights up on whichever side this line belongs to, by
+            // that side's own line number.
+            let syntax = match (line.old_no, line.new_no) {
+                (_, Some(n)) => app.new_spans.get(n as usize - 1),
+                (Some(n), _) => app.old_spans.get(n as usize - 1),
+                _ => None,
+            };
+
+            let text_width = width.saturating_sub(numw * 2 + 3);
+            let mut spans = vec![
                 Span::styled(num(line.old_no), Style::default().fg(p.gutter)),
                 Span::styled(num(line.new_no), Style::default().fg(p.gutter)),
                 Span::styled(format!("{} ", line.kind.sigil()), style),
-                Span::styled(visible, style),
             ];
+
+            match syntax {
+                // Added and removed lines keep their diff colour: the change is
+                // what the eye needs first, and syntax colour would bury it.
+                Some(s) if line.kind == LineKind::Context => spans.extend(highlighted_spans(
+                    &body,
+                    s,
+                    app.doc_scroll_x,
+                    text_width,
+                    style,
+                    p,
+                )),
+                _ => spans.push(Span::styled(
+                    body.chars()
+                        .skip(app.doc_scroll_x)
+                        .take(text_width)
+                        .collect::<String>(),
+                    style,
+                )),
+            }
 
             let rendered = Line::from(spans);
             out.push(if row == app.doc_line && app.focus == PaneId::Content {
@@ -352,22 +475,37 @@ pub(crate) fn render_content(f: &mut Frame, area: Rect, app: &App, hits: &mut Hi
                 .take(height)
                 .map(|(n, raw)| {
                     let expanded = render_line(raw, app.config.tab_width);
-                    // Horizontal scrolling is by character, not byte: slicing a
-                    // UTF-8 string by byte offset would panic mid-codepoint.
-                    let visible: String = expanded
-                        .chars()
-                        .skip(app.doc_scroll_x)
-                        .take(text_width)
-                        .collect();
 
                     let current = n == app.doc_line;
                     let number = Span::styled(
                         format!("{:>width$} ", n + 1, width = gutter),
                         Style::default().fg(if current { p.accent } else { p.gutter }),
                     );
-                    let body = Span::styled(visible, Style::default().fg(p.fg));
 
-                    let line = Line::from(vec![number, body]);
+                    // Horizontal scrolling is by character, not byte: slicing a
+                    // UTF-8 string by byte offset would panic mid-codepoint.
+                    let base = Style::default().fg(p.fg);
+                    let mut spans = vec![number];
+                    match app.doc_spans.get(n) {
+                        Some(s) => spans.extend(highlighted_spans(
+                            &expanded,
+                            s,
+                            app.doc_scroll_x,
+                            text_width,
+                            base,
+                            &p,
+                        )),
+                        None => spans.push(Span::styled(
+                            expanded
+                                .chars()
+                                .skip(app.doc_scroll_x)
+                                .take(text_width)
+                                .collect::<String>(),
+                            base,
+                        )),
+                    }
+
+                    let line = Line::from(spans);
                     if current && app.focus == PaneId::Content {
                         line.style(Style::default().bg(p.selection_bg))
                     } else {

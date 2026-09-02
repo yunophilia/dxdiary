@@ -77,6 +77,14 @@ pub struct FileDiff {
     pub removed: usize,
     /// One side was binary, so no line diff was attempted.
     pub binary: bool,
+    /// Both sides in full.
+    ///
+    /// Kept so the renderer can syntax-highlight each side *as a whole file*
+    /// and look results up by line number. Highlighting diff lines in isolation
+    /// gets multi-line strings and block comments wrong, which is exactly the
+    /// code a reviewer is squinting at.
+    pub old_text: String,
+    pub new_text: String,
 }
 
 impl FileDiff {
@@ -257,6 +265,8 @@ pub fn file_diff(path: impl Into<PathBuf>, old: &str, new: &str, context: usize)
         added,
         removed,
         binary: false,
+        old_text: old.to_string(),
+        new_text: new.to_string(),
     }
 }
 

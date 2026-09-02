@@ -52,6 +52,16 @@ pub struct App {
     /// Which of the two the content pane is showing.
     pub view: ContentView,
 
+    // --- syntax ---------------------------------------------------------
+    highlighter: crowsnest_syntax::Highlighter,
+    /// Detected language of the open file, if it is one crowsnest knows.
+    pub language: Option<crowsnest_syntax::Language>,
+    /// Highlight spans for the file view, one entry per line.
+    pub doc_spans: Vec<Vec<crowsnest_syntax::Span>>,
+    /// Spans for each side of the diff, indexed by that side's line numbers.
+    pub old_spans: Vec<Vec<crowsnest_syntax::Span>>,
+    pub new_spans: Vec<Vec<crowsnest_syntax::Span>>,
+
     pub focus: PaneId,
     pub status: String,
     pub quit: bool,
@@ -97,6 +107,11 @@ impl App {
             doc_scroll_x: 0,
             diff: None,
             view: ContentView::File,
+            highlighter: crowsnest_syntax::Highlighter::new(),
+            language: None,
+            doc_spans: Vec::new(),
+            old_spans: Vec::new(),
+            new_spans: Vec::new(),
             focus: PaneId::Tree,
             status: String::from(
                 "↑↓ move · enter open · tab pane · b baseline · c changed · q quit",
@@ -487,7 +502,40 @@ impl App {
         self.doc_scroll_y = 0;
         self.doc_scroll_x = 0;
 
+        self.highlight_doc(&path);
         self.load_diff(&path);
+    }
+
+    /// Syntax-highlight the open file.
+    fn highlight_doc(&mut self, path: &std::path::Path) {
+        self.language = crowsnest_syntax::Language::from_path(path);
+        self.doc_spans.clear();
+
+        let (Some(lang), Some(Document::Text(d))) = (self.language, &self.doc) else {
+            return;
+        };
+        let source = d.lines().join("\n");
+        self.doc_spans = self.highlighter.highlight(lang, &source);
+    }
+
+    /// Highlight both sides of the diff.
+    ///
+    /// Each side is highlighted as a complete file rather than line by line, so
+    /// multi-line strings and block comments come out right; the renderer then
+    /// looks spans up by the line numbers already on each [`DiffLine`].
+    fn highlight_diff(&mut self) {
+        self.old_spans.clear();
+        self.new_spans.clear();
+
+        let (Some(lang), Some(diff)) = (self.language, &self.diff) else {
+            return;
+        };
+        if diff.binary {
+            return;
+        }
+        let (old, new) = (diff.old_text.clone(), diff.new_text.clone());
+        self.old_spans = self.highlighter.highlight(lang, &old);
+        self.new_spans = self.highlighter.highlight(lang, &new);
     }
 
     /// Compute hunks for `path`, and show them if there are any.
@@ -507,6 +555,7 @@ impl App {
         } else {
             ContentView::File
         };
+        self.highlight_diff();
 
         if let Some(d) = &self.diff {
             self.status = format!("{} · {}", path.display(), d.summary());

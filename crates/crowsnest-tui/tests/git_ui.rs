@@ -434,3 +434,121 @@ fn the_whole_diff_is_reachable_by_scrolling() {
     let last = draw(&mut app);
     assert!(last.contains("NINETY"), "last hunk reachable:\n{last}");
 }
+
+// -------------------------------------------------------------- syntax ---
+
+/// Foreground colours of one rendered row, one entry per cell.
+///
+/// Screenshots only capture symbols, so colour has to be asserted against the
+/// buffer directly — otherwise the whole highlight pipeline could be silently
+/// dead and every text assertion would still pass.
+fn row_colors(app: &mut App, needle: &str) -> Vec<ratatui::style::Color> {
+    let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    let buf = term.backend().buffer();
+
+    for y in 0..buf.area.height {
+        let text: String = (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol())
+            .collect::<Vec<_>>()
+            .join("");
+        if text.contains(needle) {
+            return (0..buf.area.width).map(|x| buf[(x, y)].fg).collect();
+        }
+    }
+    panic!("no row containing {needle:?}");
+}
+
+/// Distinct colours on a row. `ratatui::style::Color` is not `Ord`, so this
+/// dedupes on the debug rendering rather than in a set.
+fn distinct(colors: &[ratatui::style::Color]) -> std::collections::BTreeSet<String> {
+    colors.iter().map(|c| format!("{c:?}")).collect()
+}
+
+fn syntax_app(tag: &str, file: &str, body: &str) -> App {
+    let root = std::env::temp_dir().join(format!("crowsnest-syn-{tag}"));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    write(&root, file, body);
+
+    let mut app = App::new(root.clone(), Config::default(), ColorDepth::TrueColor);
+    app.reveal_and_open(root.join(file));
+    app
+}
+
+#[test]
+fn source_files_get_a_language_and_highlight_spans() {
+    let app = syntax_app("detect", "main.rs", "fn main() {\n    let x = 1;\n}\n");
+    assert_eq!(app.language, Some(crowsnest_syntax::Language::Rust));
+    let total: usize = app.doc_spans.iter().map(|l| l.len()).sum();
+    assert!(total > 0, "spans computed: {:?}", app.doc_spans);
+}
+
+#[test]
+fn a_keyword_is_rendered_in_the_keyword_colour() {
+    let theme = Config::default().theme;
+    let want = theme
+        .syn_keyword
+        .to_color(crowsnest_core::ColorDepth::TrueColor);
+
+    let mut app = syntax_app("colour", "main.rs", "fn main() {}\n");
+    let colors = row_colors(&mut app, "fn main");
+
+    assert!(
+        colors.contains(&want),
+        "the keyword colour reaches the buffer; got {:?}",
+        distinct(&colors)
+    );
+}
+
+#[test]
+fn a_comment_and_a_keyword_get_different_colours() {
+    let mut app = syntax_app("distinct", "main.rs", "// note\nfn main() {}\n");
+    let comment = row_colors(&mut app, "// note");
+    let keyword = row_colors(&mut app, "fn main");
+
+    assert_ne!(
+        distinct(&comment),
+        distinct(&keyword),
+        "comment and code are not painted the same"
+    );
+}
+
+#[test]
+fn an_unknown_extension_renders_plainly_rather_than_failing() {
+    let app = syntax_app("unknown", "notes.txt", "just some prose\n");
+    assert_eq!(app.language, None);
+    assert!(app.doc_spans.is_empty());
+}
+
+#[test]
+fn context_lines_in_a_diff_are_syntax_highlighted() {
+    let root = std::env::temp_dir().join("crowsnest-syn-diff");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    git(&root, &["init", "--quiet"]);
+    git(&root, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    git(&root, &["config", "user.email", "t@e.com"]);
+    git(&root, &["config", "user.name", "T"]);
+    git(&root, &["config", "commit.gpgsign", "false"]);
+
+    write(&root, "lib.rs", "fn keep() {}\nfn edit() { let a = 1; }\n");
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "--quiet", "-m", "init"]);
+    write(&root, "lib.rs", "fn keep() {}\nfn edit() { let a = 2; }\n");
+
+    let mut app = App::new(root.clone(), Config::default(), ColorDepth::TrueColor);
+    app.attach_vcs(Box::new(GitRepo::open(&root).unwrap()));
+    app.reveal_and_open(root.join("lib.rs"));
+
+    assert_eq!(app.view, crowsnest_tui::ContentView::Diff);
+    assert!(!app.new_spans.is_empty(), "the new side is highlighted");
+    assert!(!app.old_spans.is_empty(), "the old side is highlighted");
+
+    let want = Config::default()
+        .theme
+        .syn_keyword
+        .to_color(crowsnest_core::ColorDepth::TrueColor);
+    let colors = row_colors(&mut app, "fn keep");
+    assert!(colors.contains(&want), "context line keeps syntax colour");
+}
