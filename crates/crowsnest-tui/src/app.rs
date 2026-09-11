@@ -24,6 +24,13 @@ use crate::term::Tui;
 /// round trip, so idling must be silent.
 const POLL: Duration = Duration::from_millis(500);
 
+/// Quiet time after the last keystroke before the language server is told.
+///
+/// Every keystroke would be correct but wasteful: the server re-analyses on
+/// each change, and nobody wants diagnostics for the half-typed word. Long
+/// enough to cover a burst of typing, short enough that the markers feel live.
+const CHANGE_DEBOUNCE: Duration = Duration::from_millis(150);
+
 /// Editing mode.
 ///
 /// Modal rather than always-insert: crowsnest is a reviewer first, and every
@@ -33,6 +40,17 @@ const POLL: Duration = Duration::from_millis(500);
 pub enum Mode {
     Normal,
     Insert,
+}
+
+/// An action that would throw away unsaved edits, asked for once.
+///
+/// Asking a second time performs it. A modal "are you sure?" would need its own
+/// key handling and render path; repeating the key is the same confirmation
+/// with none of that, and it is what the user's fingers do anyway.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Discard {
+    Quit,
+    Open,
 }
 
 /// What the content pane shows for the open file.
@@ -86,6 +104,11 @@ pub struct App {
     pub lsp_note: Option<String>,
     /// Request id of an outstanding hover, so its reply can be recognised.
     hover_id: Option<i64>,
+    /// When the buffer last changed without the server being told, in the
+    /// `now_ms` clock. `None` when the server is up to date.
+    lsp_change_at: Option<u64>,
+    /// The destructive action that was refused because of unsaved edits.
+    discard_armed: Option<Discard>,
 
     // --- syntax ---------------------------------------------------------
     highlighter: crowsnest_syntax::Highlighter,
@@ -151,6 +174,8 @@ impl App {
             diagnostics: Vec::new(),
             lsp_note: None,
             hover_id: None,
+            lsp_change_at: None,
+            discard_armed: None,
             highlighter: crowsnest_syntax::Highlighter::new(),
             language: None,
             doc_spans: Vec::new(),
@@ -314,7 +339,13 @@ impl App {
                 dirty = false;
             }
 
-            if event::poll(POLL)? {
+            // While an edit is waiting to be sent, wake early enough to send it.
+            let wait = if self.lsp_change_at.is_some() {
+                CHANGE_DEBOUNCE
+            } else {
+                POLL
+            };
+            if event::poll(wait)? {
                 dirty |= self.handle(event::read()?);
                 // Drain the burst before redrawing. A scroll wheel emits many
                 // events at once and repainting each one is wasted bandwidth
@@ -407,12 +438,11 @@ impl App {
             let text = b.text();
             self.doc_spans = self.highlighter.highlight(lang, &text);
 
-            // Read-only LSP has no didChange, so the server's diagnostics are
-            // now stale. Clearing them is honest; showing markers against
-            // shifted lines would be worse than showing none.
-            if !self.diagnostics.is_empty() {
-                self.diagnostics.clear();
-            }
+            // The server is told after a pause, not per keystroke; until then
+            // the existing markers stay. They may sit a line off for a moment
+            // after an inserted newline, which is what every editor shows, and
+            // far less confusing than markers that vanish while typing.
+            self.lsp_change_at = Some(now_ms());
         }
         self.clamp_content();
     }
@@ -435,11 +465,37 @@ impl App {
                 // both stale.
                 self.refresh_git();
                 self.load_diff(&path);
-                self.notify_lsp_open(&path);
+                self.notify_lsp_save(&path);
             }
             Err(e) => self.status = format!("save failed: {e}"),
         }
+        self.discard_armed = None;
         true
+    }
+
+    /// May `action` go ahead, given the state of the buffer?
+    ///
+    /// Yes when there is nothing to lose, or when this same action was refused
+    /// last time -- the repeat is the confirmation. Otherwise arm it and say
+    /// why.
+    fn may_discard(&mut self, action: Discard) -> bool {
+        if !self.is_dirty() || self.discard_armed == Some(action) {
+            self.discard_armed = None;
+            return true;
+        }
+        self.discard_armed = Some(action);
+        let name = self
+            .buffer
+            .as_ref()
+            .and_then(|b| b.path.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let again = match action {
+            Discard::Quit => "quit again to discard",
+            Discard::Open => "open again to discard",
+        };
+        self.status = format!("{name} has unsaved changes — ctrl-s to save, {again}");
+        false
     }
 
     fn on_normal_key(&mut self, k: KeyEvent) -> bool {
@@ -455,7 +511,9 @@ impl App {
 
         match k.code {
             KeyCode::Char('q') | KeyCode::Esc => {
-                self.quit = true;
+                if self.may_discard(Discard::Quit) {
+                    self.quit = true;
+                }
                 true
             }
             KeyCode::Tab | KeyCode::BackTab => {
@@ -643,6 +701,11 @@ impl App {
     }
 
     pub fn open(&mut self, path: PathBuf) {
+        if !self.may_discard(Discard::Open) {
+            return;
+        }
+        self.notify_lsp_close();
+
         let doc = Document::load(&path, self.config.max_file_bytes);
         self.status = match &doc {
             Document::Text(d) => format!("{} · {} lines", path.display(), d.line_count()),
@@ -860,10 +923,9 @@ impl App {
         self.lsp_note = None;
 
         let Some(lang) = self.language else { return };
-        let Some(Document::Text(doc)) = &self.doc else {
+        let Some(text) = self.current_text() else {
             return;
         };
-        let text = doc.lines().join("\n");
 
         if !self.lsp.contains_key(&lang) {
             let Some(spec) = crowsnest_lsp::spec_for(lang) else {
@@ -898,12 +960,68 @@ impl App {
         }
     }
 
+    /// The text the server should be looking at: the buffer once a text file
+    /// is open, since edits land there and nowhere else.
+    fn current_text(&self) -> Option<String> {
+        self.buffer.as_ref().map(|b| b.text())
+    }
+
+    /// Send a pending edit now if it has rested for [`CHANGE_DEBOUNCE`], or
+    /// regardless when `force` -- a save must not race its own change.
+    fn flush_lsp_change(&mut self, force: bool) {
+        let Some(at) = self.lsp_change_at else { return };
+        if !force && now_ms().saturating_sub(at) < CHANGE_DEBOUNCE.as_millis() as u64 {
+            return;
+        }
+        self.lsp_change_at = None;
+        let (Some(lang), Some(buf)) = (self.language, &self.buffer) else {
+            return;
+        };
+        if let Some(client) = self.lsp.get(&lang) {
+            let _ = client.did_change(&buf.path, &buf.text());
+        }
+    }
+
+    fn notify_lsp_save(&mut self, path: &std::path::Path) {
+        self.flush_lsp_change(true);
+        let Some(lang) = self.language else { return };
+        if let Some(client) = self.lsp.get(&lang) {
+            let _ = client.did_save(path);
+        }
+    }
+
+    /// Close the open file with its server, if it had one.
+    fn notify_lsp_close(&mut self) {
+        // An unsent edit belongs to a file that is going away.
+        self.lsp_change_at = None;
+        let (Some(lang), Some(doc)) = (self.language, &self.doc) else {
+            return;
+        };
+        if let Some(client) = self.lsp.get(&lang) {
+            let _ = client.did_close(doc.path());
+        }
+    }
+
+    /// Use an already-running client for `lang` rather than spawning one.
+    ///
+    /// For tests, which drive the app against a mock server: no real language
+    /// server can be assumed on a build machine.
+    pub fn attach_lsp(&mut self, lang: crowsnest_syntax::Language, client: crowsnest_lsp::Client) {
+        self.lsp.insert(lang, client);
+    }
+
+    /// The running client for `lang`, if any. For tests.
+    pub fn lsp_client(&self, lang: crowsnest_syntax::Language) -> Option<&crowsnest_lsp::Client> {
+        self.lsp.get(&lang)
+    }
+
     /// Collect anything the servers have sent.
     ///
     /// Polled from the event loop, never from `render`: a server can go quiet
     /// for seconds and a frame must not wait on it. Public so tests and the
     /// screenshot example can drive it without a live loop.
     pub fn poll_lsp(&mut self) -> bool {
+        self.flush_lsp_change(false);
         let Some(lang) = self.language else {
             return false;
         };
@@ -952,10 +1070,7 @@ impl App {
         if let Some(items) = incoming {
             // The C filter: clangd's output inside a function containing a GCC
             // nested function is parse-recovery noise (DESIGN.md §2).
-            let source = match &self.doc {
-                Some(Document::Text(d)) => d.lines().join("\n"),
-                _ => String::new(),
-            };
+            let source = self.current_text().unwrap_or_default();
             let filtered = crowsnest_lsp::filter(lang, &source, items);
             self.lsp_note = filtered.note();
             self.diagnostics = filtered.kept;

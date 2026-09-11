@@ -911,3 +911,251 @@ fn ctrl_c_quits_even_from_insert_mode() {
     }));
     assert!(app.quit, "a runaway session must always be escapable");
 }
+
+// ---------------------------------------------------------------- lsp sync
+
+/// An app with the mock language server attached for Rust, or `None` when
+/// python is unavailable -- the test then skips rather than fails, as the
+/// client's own round-trip tests do.
+fn lsp_app(tag: &str, body: &str) -> Option<App> {
+    let python = ["python3", "python"]
+        .into_iter()
+        .find(|c| crowsnest_lsp::registry::find_on_path(c).is_some())?;
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../crowsnest-lsp/tests/mock_server.py");
+
+    let root = std::env::temp_dir().join(format!("crowsnest-lsp-{tag}"));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    write(&root, "code.rs", body);
+    write(&root, "other.rs", "fn other() {}\n");
+
+    let mut cmd = Command::new(python);
+    cmd.arg(&script);
+    let spec = crowsnest_lsp::spec_for(crowsnest_syntax::Language::Rust).unwrap();
+    let client = crowsnest_lsp::Client::from_command(cmd, spec, &root).expect("mock starts");
+
+    let mut app = App::new(root.clone(), Config::default(), ColorDepth::TrueColor);
+    app.attach_lsp(crowsnest_syntax::Language::Rust, client);
+    app.reveal_and_open(root.join("code.rs"));
+    Some(app)
+}
+
+/// Poll until a diagnostic with `message` is showing, or give up.
+fn await_message(app: &mut App, message: &str) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        app.poll_lsp();
+        if app.diagnostics.iter().any(|d| d.message == message) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    false
+}
+
+fn version_of(app: &App, path: &Path) -> Option<i32> {
+    app.lsp_client(crowsnest_syntax::Language::Rust)
+        .unwrap()
+        .version_of(path)
+}
+
+fn ctrl(app: &mut App, ch: char) -> bool {
+    app.handle(Event::Key(KeyEvent {
+        code: KeyCode::Char(ch),
+        modifiers: KeyModifiers::CONTROL,
+        kind: KeyEventKind::Press,
+        state: crossterm::event::KeyEventState::NONE,
+    }))
+}
+
+#[test]
+fn opening_a_file_tells_the_server_and_shows_its_diagnostics() {
+    let Some(mut app) = lsp_app("open", "fn main() {}\nlet x =\n") else {
+        eprintln!("skipped: python not available");
+        return;
+    };
+    assert!(await_message(&mut app, "mock diagnostic"), "{}", app.status);
+    assert_eq!(app.diagnostics[0].range.start.line, 1);
+    assert!(
+        app.diagnostic_at(1).is_some() && app.diagnostic_at(0).is_none(),
+        "the gutter marks exactly the diagnosed line"
+    );
+}
+
+#[test]
+fn edits_reach_the_server_after_a_pause_not_per_keystroke() {
+    let Some(mut app) = lsp_app("change", "fn main() {}\n") else {
+        eprintln!("skipped: python not available");
+        return;
+    };
+    assert!(await_message(&mut app, "mock diagnostic"));
+    let path = app.buffer.as_ref().unwrap().path.clone();
+    assert_eq!(version_of(&app, &path), Some(1));
+
+    key(&mut app, KeyCode::Char('i'));
+    typed(&mut app, "let a = 1;\nlet b = 2;\n");
+    key(&mut app, KeyCode::Esc);
+
+    // Typing alone sends nothing: many keystrokes, still version 1, and the
+    // markers from before the edit are still on screen rather than wiped.
+    app.poll_lsp();
+    assert_eq!(
+        version_of(&app, &path),
+        Some(1),
+        "no change sent before the debounce"
+    );
+    assert!(!app.diagnostics.is_empty(), "markers survive an edit");
+
+    // After the pause, exactly one change carrying the whole text. The mock
+    // answers with a diagnostic on the last line of what it received: the
+    // buffer now has three lines, so line 3 is the empty tail.
+    assert!(await_message(&mut app, "v2"), "{}", app.status);
+    assert_eq!(
+        version_of(&app, &path),
+        Some(2),
+        "one change for the whole burst"
+    );
+    assert_eq!(app.diagnostics[0].range.start.line, 3);
+}
+
+#[test]
+fn saving_flushes_the_pending_change_before_announcing_the_save() {
+    let Some(mut app) = lsp_app("save", "x\n") else {
+        eprintln!("skipped: python not available");
+        return;
+    };
+    assert!(await_message(&mut app, "mock diagnostic"));
+    let path = app.buffer.as_ref().unwrap().path.clone();
+
+    key(&mut app, KeyCode::Char('i'));
+    typed(&mut app, "y");
+    key(&mut app, KeyCode::Esc);
+    // Save immediately, inside the debounce window: the change must not be
+    // lost or arrive after the save.
+    ctrl(&mut app, 's');
+    assert!(!app.is_dirty(), "{}", app.status);
+
+    assert_eq!(
+        version_of(&app, &path),
+        Some(2),
+        "the edit went out with the save"
+    );
+    assert!(await_message(&mut app, "saved"), "{}", app.status);
+}
+
+#[test]
+fn switching_files_closes_the_old_one_with_the_server() {
+    let Some(mut app) = lsp_app("close", "x\n") else {
+        eprintln!("skipped: python not available");
+        return;
+    };
+    assert!(await_message(&mut app, "mock diagnostic"));
+    let first = app.buffer.as_ref().unwrap().path.clone();
+    let root = first.parent().unwrap().to_path_buf();
+
+    app.reveal_and_open(root.join("other.rs"));
+    assert_eq!(version_of(&app, &first), None, "closed");
+    assert_eq!(version_of(&app, &root.join("other.rs")), Some(1), "opened");
+}
+
+// ------------------------------------------------------------ unsaved guard
+
+fn name_of(app: &App) -> String {
+    app.buffer
+        .as_ref()
+        .unwrap()
+        .path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[test]
+fn quitting_with_unsaved_edits_asks_and_a_repeat_confirms() {
+    let mut app = edit_app("guard-quit", "x\n");
+    key(&mut app, KeyCode::Char('i'));
+    typed(&mut app, "y");
+    key(&mut app, KeyCode::Esc);
+
+    key(&mut app, KeyCode::Char('q'));
+    assert!(!app.quit, "first quit must not lose the edit");
+    assert!(app.status.contains("unsaved"), "{}", app.status);
+    assert!(
+        app.status.contains("code.rs"),
+        "names the file: {}",
+        app.status
+    );
+
+    key(&mut app, KeyCode::Char('q'));
+    assert!(app.quit, "the repeat is the confirmation");
+}
+
+#[test]
+fn saving_disarms_the_quit_confirmation() {
+    let mut app = edit_app("guard-save", "x\n");
+    key(&mut app, KeyCode::Char('i'));
+    typed(&mut app, "y");
+    key(&mut app, KeyCode::Esc);
+    key(&mut app, KeyCode::Char('q'));
+    assert!(!app.quit);
+
+    ctrl(&mut app, 's');
+    key(&mut app, KeyCode::Char('q'));
+    assert!(app.quit, "nothing left to lose after a save");
+}
+
+#[test]
+fn opening_another_file_with_unsaved_edits_asks_first() {
+    let mut app = edit_app("guard-open", "x\n");
+    let root = app
+        .buffer
+        .as_ref()
+        .unwrap()
+        .path
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    write(&root, "second.rs", "fn second() {}\n");
+    app.tree.refresh();
+
+    key(&mut app, KeyCode::Char('i'));
+    typed(&mut app, "y");
+    key(&mut app, KeyCode::Esc);
+
+    app.reveal_and_open(root.join("second.rs"));
+    assert!(app.is_dirty(), "the edit is still there");
+    assert_eq!(name_of(&app), "code.rs", "the dirty file stays open");
+    assert!(app.status.contains("unsaved"), "{}", app.status);
+
+    app.reveal_and_open(root.join("second.rs"));
+    assert_eq!(name_of(&app), "second.rs");
+    assert!(!app.is_dirty());
+}
+
+#[test]
+fn a_quit_refusal_does_not_stand_in_for_an_open_confirmation() {
+    // Arming is per action: refusing to quit must not make the next open
+    // silently discard the edit.
+    let mut app = edit_app("guard-cross", "x\n");
+    let root = app
+        .buffer
+        .as_ref()
+        .unwrap()
+        .path
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    write(&root, "second.rs", "fn second() {}\n");
+    app.tree.refresh();
+
+    key(&mut app, KeyCode::Char('i'));
+    typed(&mut app, "y");
+    key(&mut app, KeyCode::Esc);
+    key(&mut app, KeyCode::Char('q'));
+    assert!(!app.quit);
+
+    app.reveal_and_open(root.join("second.rs"));
+    assert_eq!(name_of(&app), "code.rs");
+}

@@ -235,3 +235,87 @@ mod tempdir {
         }
     }
 }
+
+#[test]
+fn changes_carry_increasing_versions_and_the_full_text() {
+    let Some((client, dir)) = mock_client() else {
+        eprintln!("skipped: python3 not available");
+        return;
+    };
+    let file = dir.path().join("a.rs");
+    client.did_open(&file, "rust", "fn main() {}\n").unwrap();
+    assert_eq!(client.version_of(&file), Some(1));
+
+    // The mock publishes a diagnostic on the last line of whatever text it was
+    // sent, with the version in the message: proof of both what arrived and
+    // which version it was labelled with.
+    assert_eq!(
+        client
+            .did_change(&file, "fn main() {}\n\n\nlet x =\n")
+            .unwrap(),
+        Some(2)
+    );
+    let event = wait_for(&client, TIMEOUT, |e| {
+        matches!(e, Event::Diagnostics { items, .. } if items.iter().any(|d| d.message == "v2"))
+    })
+    .expect("diagnostics for version 2 arrive");
+    let Event::Diagnostics { items, .. } = event else {
+        unreachable!()
+    };
+    assert_eq!(items[0].range.start.line, 4, "last line of the new text");
+
+    assert_eq!(client.did_change(&file, "").unwrap(), Some(3));
+    assert_eq!(client.version_of(&file), Some(3));
+}
+
+#[test]
+fn a_change_to_a_document_never_opened_is_dropped() {
+    let Some((client, dir)) = mock_client() else {
+        eprintln!("skipped: python3 not available");
+        return;
+    };
+    let file = dir.path().join("never.rs");
+    assert_eq!(client.did_change(&file, "x").unwrap(), None);
+    assert_eq!(client.version_of(&file), None);
+}
+
+#[test]
+fn opening_twice_does_not_reset_the_version() {
+    let Some((client, dir)) = mock_client() else {
+        eprintln!("skipped: python3 not available");
+        return;
+    };
+    let file = dir.path().join("a.rs");
+    client.did_open(&file, "rust", "a").unwrap();
+    client.did_change(&file, "ab").unwrap();
+    client.did_open(&file, "rust", "ab").unwrap();
+    assert_eq!(client.version_of(&file), Some(2), "second open is a no-op");
+}
+
+#[test]
+fn save_and_close_reach_the_server() {
+    let Some((client, dir)) = mock_client() else {
+        eprintln!("skipped: python3 not available");
+        return;
+    };
+    let file = dir.path().join("a.rs");
+    client.did_open(&file, "rust", "a").unwrap();
+
+    client.did_save(&file).unwrap();
+    wait_for(&client, TIMEOUT, |e| {
+        matches!(e, Event::Diagnostics { items, .. } if items.iter().any(|d| d.message == "saved"))
+    })
+    .expect("didSave observed");
+
+    client.did_close(&file).unwrap();
+    wait_for(
+        &client,
+        TIMEOUT,
+        |e| matches!(e, Event::Diagnostics { items, .. } if items.is_empty()),
+    )
+    .expect("didClose clears diagnostics");
+    assert_eq!(client.version_of(&file), None);
+
+    // Closed means forgotten: a change now goes nowhere.
+    assert_eq!(client.did_change(&file, "b").unwrap(), None);
+}

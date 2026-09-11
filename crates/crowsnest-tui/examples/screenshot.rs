@@ -66,6 +66,69 @@ fn main() -> anyhow::Result<()> {
         eprintln!("diagnostics arrived: {got}");
     }
 
+    // `CROWSNEST_SHOT=lsp-edit` goes one step further: once the server has
+    // reported on the file as it is on disk, replace its second line with
+    // `CROWSNEST_LINE` and wait for the server to reconsider. Against a real
+    // rust-analyzer this proves didChange end to end -- a type error that the
+    // edit fixes must take its marker with it.
+    if std::env::var("CROWSNEST_SHOT").as_deref() == Ok("lsp-edit") {
+        let got = app.await_diagnostics(std::time::Duration::from_secs(90));
+        eprintln!("diagnostics before edit: {got} ({})", app.diagnostics.len());
+        let before = app.diagnostics.len();
+
+        let line = std::env::var("CROWSNEST_LINE").unwrap_or_default();
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let press = |app: &mut crowsnest_tui::App, code| {
+            app.handle(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        };
+        // Focus starts on the tree, where Down moves the selection.
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('D'));
+        press(&mut app, KeyCode::Char('i'));
+        for ch in line.chars() {
+            press(&mut app, KeyCode::Char(ch));
+        }
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Esc);
+
+        // Poll until the server publishes for the edited version, i.e. the
+        // count changes, or give up.
+        let settle = |app: &mut crowsnest_tui::App, before: usize, what: &str| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while std::time::Instant::now() < deadline {
+                app.poll_lsp();
+                if app.diagnostics.len() != before {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            eprintln!("diagnostics after {what}: {}", app.diagnostics.len());
+            for d in &app.diagnostics {
+                eprintln!(
+                    "  line {} [{}] {}",
+                    d.range.start.line,
+                    d.source.as_deref().unwrap_or("?"),
+                    d.message.lines().next().unwrap_or("")
+                );
+            }
+        };
+        settle(&mut app, before, "edit");
+
+        // `CROWSNEST_SAVE=1` also writes the file. rust-analyzer runs `cargo
+        // check` on didSave, not on didChange, so the `[rustc]` diagnostics
+        // only move here. This modifies the file given: use a scratch copy.
+        if std::env::var("CROWSNEST_SAVE").as_deref() == Ok("1") {
+            let before = app.diagnostics.len();
+            app.handle(Event::Key(KeyEvent::new(
+                KeyCode::Char('s'),
+                KeyModifiers::CONTROL,
+            )));
+            eprintln!("{}", app.status);
+            settle(&mut app, before, "save");
+        }
+    }
+
     let mut term = Terminal::new(TestBackend::new(w, h))?;
     term.draw(|f| app.render(f))?;
 

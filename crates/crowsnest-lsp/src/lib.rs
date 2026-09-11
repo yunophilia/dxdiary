@@ -1,9 +1,11 @@
 //! Language Server Protocol client.
 //!
-//! Read-only by design for now: `initialize`, `didOpen`, `hover`, `definition`,
-//! `documentSymbol`, and `publishDiagnostics`. No `didChange`, because nothing
-//! mutates a buffer yet — which removes incremental sync, the fiddliest part of
-//! an LSP client, until editing actually needs it.
+//! Speaks `initialize`, `didOpen`/`didChange`/`didSave`/`didClose`, `hover`,
+//! `definition`, `documentSymbol`, and `publishDiagnostics`. Document sync is
+//! always the whole text, never a range: on a pipe to a local process the
+//! bandwidth is nothing, and an edit log that must exactly mirror the buffer is
+//! the fiddliest part of an LSP client, with bugs that show up as diagnostics
+//! on the wrong line.
 //!
 //! No async runtime. A reader thread feeds a channel and the UI polls, the same
 //! shape blame uses.

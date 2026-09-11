@@ -5,6 +5,8 @@
 //! nothing blocks a frame. Adding tokio for one subprocess would be a large
 //! dependency for no benefit in a synchronous event loop.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::io::{BufReader, BufWriter};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -37,6 +39,13 @@ pub struct Client {
     pub events: Receiver<Event>,
     next_id: Arc<AtomicI64>,
     pub spec: &'static ServerSpec,
+    /// Version of every document the server has been told about, by URI.
+    ///
+    /// The protocol requires versions to increase per document, and a server
+    /// uses them to discard diagnostics computed against text the client has
+    /// since replaced. Tracked here rather than by the caller so that the
+    /// invariant cannot be broken from outside.
+    versions: RefCell<HashMap<String, i32>>,
 }
 
 impl Client {
@@ -115,6 +124,7 @@ impl Client {
             events: ev_rx,
             next_id: Arc::new(AtomicI64::new(1)),
             spec,
+            versions: RefCell::new(HashMap::new()),
         };
         client.initialize(root)?;
         Ok(client)
@@ -132,10 +142,9 @@ impl Client {
                         "definition":     {},
                         "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
                         "publishDiagnostics": {},
+                        "synchronization": { "didSave": true },
                     }
                 },
-                // Phase 4 is read-only: no didChange, so no incremental sync to
-                // negotiate. That is a large simplification, not an oversight.
                 "clientInfo": { "name": "crowsnest" },
             }),
         )?;
@@ -160,16 +169,86 @@ impl Client {
     }
 
     /// Tell the server about a file we are showing.
+    ///
+    /// Opening a document the server already has is a protocol error, so a
+    /// second call for the same path is a no-op rather than a duplicate.
     pub fn did_open(&self, path: &std::path::Path, language_id: &str, text: &str) -> Result<()> {
+        let uri = path_to_uri(path);
+        if self.versions.borrow().contains_key(&uri) {
+            return Ok(());
+        }
+        self.versions.borrow_mut().insert(uri.clone(), 1);
         self.notify(
             "textDocument/didOpen",
             json!({"textDocument": {
-                "uri": path_to_uri(path),
+                "uri": uri,
                 "languageId": language_id,
                 "version": 1,
                 "text": text,
             }}),
         )
+    }
+
+    /// Send the document's new full text.
+    ///
+    /// Always the whole document, never a range. The specification makes the
+    /// range-less form valid whatever sync kind the server announced, and
+    /// every server crowsnest ships a spec for accepts it. Incremental sync
+    /// would save bandwidth on a pipe to a local process, which is nothing,
+    /// at the cost of an edit log that must exactly mirror the rope — a class
+    /// of bug that is silent until diagnostics land on the wrong line.
+    ///
+    /// Returns the version sent, or `None` when the document was never
+    /// opened -- a change for an unknown document is dropped, not sent, since
+    /// the server would reject it.
+    pub fn did_change(&self, path: &std::path::Path, text: &str) -> Result<Option<i32>> {
+        let uri = path_to_uri(path);
+        let version = {
+            let mut versions = self.versions.borrow_mut();
+            let Some(v) = versions.get_mut(&uri) else {
+                return Ok(None);
+            };
+            *v += 1;
+            *v
+        };
+        self.notify(
+            "textDocument/didChange",
+            json!({
+                "textDocument": { "uri": uri, "version": version },
+                "contentChanges": [ { "text": text } ],
+            }),
+        )?;
+        Ok(Some(version))
+    }
+
+    /// The document was written to disk. Servers that build (gopls, clangd
+    /// with a compilation database) use this as their cue.
+    pub fn did_save(&self, path: &std::path::Path) -> Result<()> {
+        let uri = path_to_uri(path);
+        if !self.versions.borrow().contains_key(&uri) {
+            return Ok(());
+        }
+        self.notify(
+            "textDocument/didSave",
+            json!({"textDocument": { "uri": uri }}),
+        )
+    }
+
+    /// The document is no longer shown; the server owns its truth again.
+    pub fn did_close(&self, path: &std::path::Path) -> Result<()> {
+        let uri = path_to_uri(path);
+        if self.versions.borrow_mut().remove(&uri).is_none() {
+            return Ok(());
+        }
+        self.notify(
+            "textDocument/didClose",
+            json!({"textDocument": { "uri": uri }}),
+        )
+    }
+
+    /// Current version of an open document, for tests.
+    pub fn version_of(&self, path: &std::path::Path) -> Option<i32> {
+        self.versions.borrow().get(&path_to_uri(path)).copied()
     }
 
     pub fn hover(&self, path: &std::path::Path, line: u32, character: u32) -> Result<i64> {

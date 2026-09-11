@@ -449,8 +449,12 @@ server for everything a real one cannot be relied on to do.
 shape blame uses. Adding tokio for one subprocess would be a large dependency for no
 benefit in a synchronous event loop.
 
-**Read-only, so no `didChange`.** That removes incremental document sync, the
-fiddliest part of an LSP client, until editing actually needs it.
+**Full-text sync, never incremental.** Phase 4 was read-only and skipped `didChange`
+entirely; Phase 7 added it as the whole document, sent after 150 ms of quiet rather
+than per keystroke. The range-less form is valid whatever sync kind the server
+announced, and on a pipe to a local process the bandwidth is nothing. An incremental
+edit log would have to mirror the rope exactly, and a mismatch there is silent until
+diagnostics land on the wrong line.
 
 **Presence on `PATH` is not availability.** `~/.cargo/bin/rust-analyzer` is a rustup
 *shim*: it exists, it is executable, and when the component is not installed it
@@ -522,9 +526,17 @@ A goal column is preserved across short lines — moving down through a short li
 back returns to the original column, which is the thing naive implementations get
 wrong.
 
-**Known gap: no LSP `didChange`.** Diagnostics are cleared on edit rather than shown
-against shifted lines, and refresh on save. Incremental document sync is the honest
-next step if editing becomes the primary use.
+**Live diagnostics.** Edits reach the language server as full-text `didChange` after a
+150 ms pause, `ctrl-s` flushes any pending change before `didSave`, and opening another
+file sends `didClose`. Until the server answers, the previous markers stay where they
+were — briefly a line off after an inserted newline, which is what every editor shows
+and far less confusing than markers that vanish while typing.
+
+**Unsaved edits are never discarded silently.** `q` or opening another file with a
+dirty buffer refuses once and says why; the same action again is the confirmation.
+Arming is per action, so a refused quit does not license the next open. `ctrl-c`
+remains unconditional — a runaway session must always be escapable, and that is the
+one key documented as such.
 
 ## 9. Risks
 

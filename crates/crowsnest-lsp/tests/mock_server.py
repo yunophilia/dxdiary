@@ -11,6 +11,11 @@ Behaviour is deliberately simple and deterministic:
 
   initialize            -> capabilities
   textDocument/didOpen  -> publishDiagnostics with one error on line 1
+  textDocument/didChange -> publishDiagnostics on the document's last line,
+                           message naming the version received, so a test
+                           can prove which text the server is looking at
+  textDocument/didSave  -> publishDiagnostics with message "saved"
+  textDocument/didClose -> publishDiagnostics with an empty list
   textDocument/hover    -> hover text naming the position
   textDocument/definition -> a location in the same file
   anything else with an id -> a JSON-RPC "method not found" error
@@ -46,6 +51,23 @@ def send(payload):
     sys.stdout.buffer.flush()
 
 
+def diagnostic(line, message):
+    return {
+        "range": {"start": {"line": line, "character": 0},
+                  "end": {"line": line, "character": 4}},
+        "severity": 1,
+        "message": message,
+    }
+
+
+def publish(uri, diagnostics):
+    send({
+        "jsonrpc": "2.0",
+        "method": "textDocument/publishDiagnostics",
+        "params": {"uri": uri, "diagnostics": diagnostics},
+    })
+
+
 def reply(msg_id, result):
     send({"jsonrpc": "2.0", "id": msg_id, "result": result})
 
@@ -66,19 +88,18 @@ def main():
             pass
         elif method == "textDocument/didOpen":
             uri = msg["params"]["textDocument"]["uri"]
-            send({
-                "jsonrpc": "2.0",
-                "method": "textDocument/publishDiagnostics",
-                "params": {
-                    "uri": uri,
-                    "diagnostics": [{
-                        "range": {"start": {"line": 1, "character": 0},
-                                  "end": {"line": 1, "character": 4}},
-                        "severity": 1,
-                        "message": "mock diagnostic",
-                    }],
-                },
-            })
+            publish(uri, [diagnostic(1, "mock diagnostic")])
+        elif method == "textDocument/didChange":
+            doc = msg["params"]["textDocument"]
+            changes = msg["params"]["contentChanges"]
+            # Full-content sync: exactly one change with no range.
+            assert len(changes) == 1 and "range" not in changes[0], changes
+            last = changes[0]["text"].count("\n")
+            publish(doc["uri"], [diagnostic(last, "v%d" % doc["version"])])
+        elif method == "textDocument/didSave":
+            publish(msg["params"]["textDocument"]["uri"], [diagnostic(0, "saved")])
+        elif method == "textDocument/didClose":
+            publish(msg["params"]["textDocument"]["uri"], [])
         elif method == "textDocument/hover":
             pos = msg["params"]["position"]
             reply(msg_id, {"contents": {

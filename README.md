@@ -55,6 +55,9 @@ Undo groups by pause, so typing a word and undoing removes the word. `●` in th
 title means unsaved. Saving writes a temp file and renames, so an interrupted save
 cannot truncate your source.
 
+Quitting or opening another file with unsaved edits refuses once and tells you; do
+it again to discard. `ctrl-c` skips the question.
+
 Git:
 
 | | |
@@ -72,6 +75,9 @@ Language servers:
 |---|---|
 | `K` | hover information at the cursor |
 | gutter | `✗` error, `!` warning, `i` info |
+
+Diagnostics are live: the server sees each edit after a short pause and again on
+save, so markers follow what you type rather than what is on disk.
 
 ```bash
 cargo run -- --doctor
@@ -95,9 +101,9 @@ the nearest tag.
 
 Not a git repository? crowsnest opens anyway as a plain file browser.
 
-Everything is reachable from the keyboard alone — spike 0.2 has not yet confirmed
-herdr forwards mouse events into plugin panes, so the mouse is an enhancement rather
-than a dependency.
+Everything is reachable from the keyboard alone. Spike 0.2 confirmed herdr forwards
+mouse events into plugin panes, and over SSH, but an unknown terminal at the far end
+of a hop may not — so the mouse is an enhancement rather than a dependency.
 
 ### Terminal capabilities
 
@@ -214,15 +220,20 @@ crowsnest/
 ├── Dockerfile                    # cross-compilation toolchain image
 ├── scripts/build.sh              # drives the target matrix
 ├── .github/workflows/release.yml # checks, then the same Dockerfile
+├── crowsnest-plugin.toml         # herdr plugin manifest
 ├── crates/
-│   ├── crowsnest-core/           # model: tree, document, hit map, config
+│   ├── crowsnest-core/           # model: tree, document, buffer, hit map, config
 │   ├── crowsnest-vcs/            # Vcs trait + gix backend (the only gix user)
+│   ├── crowsnest-syntax/         # tree-sitter highlighting, C nested-function scan
+│   ├── crowsnest-lsp/            # JSON-RPC client, server registry, C filter
+│   ├── crowsnest-herdr/          # plugin context: worktree binding, state dir
 │   └── crowsnest-tui/            # ratatui panes, event loop, terminal queries
 ├── spikes/
 │   ├── FINDINGS.md               # what the spikes settled — read this
 │   ├── 01-treesitter-c-nested/   # PASS — tree-sitter vs GCC nested functions
-│   ├── 02-04-terminal-probe/     # pending — mouse + rendering under herdr
-│   └── 03-gix-perf/              # PASS — gix API coverage and perf
+│   ├── 02-04-terminal-probe/     # PASS — mouse forwarded through herdr and SSH
+│   ├── 03-gix-perf/              # PASS — gix API coverage and perf
+│   └── 05-wezterm-harness/       # automated terminal tests under bash and zsh
 └── src/main.rs                   # the binary
 ```
 
