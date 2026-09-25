@@ -7,7 +7,7 @@
 # behaviour testable from a script -- which matters here, because capability
 # detection is exactly the thing that cannot be checked with a unit test.
 #
-#   ./run.sh [path-to-crowsnest]
+#   ./run.sh [path-to-dxdiary]
 #
 # Exits non-zero if any assertion fails.
 
@@ -18,7 +18,7 @@ WEZTERM="$TOOLS/squashfs-root/usr/bin/wezterm"
 MUX="$TOOLS/squashfs-root/usr/bin/wezterm-mux-server"
 ZSH="$TOOLS/zsh/bin/zsh"
 
-CN="${1:-$HOME/.cache/crowsnest-target/debug/crowsnest}"
+CN="${1:-$HOME/.cache/dxdiary-target/debug/dxdiary}"
 
 pass=0
 fail=0

@@ -1,0 +1,11 @@
+[package]
+name = "dxdiary-lsp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+dxdiary-syntax = { path = "../dxdiary-syntax" }
+lsp-types = "0.97"
+serde = { workspace = true }
+serde_json = "1"

@@ -8,7 +8,7 @@ GUI, no X display. `wezterm cli` then spawns panes, types into them, and reads b
 what is on screen. That is enough to test the real code path in CI.
 
 ```bash
-./run.sh [path-to-crowsnest]
+./run.sh [path-to-dxdiary]
 ```
 
 ## Setup

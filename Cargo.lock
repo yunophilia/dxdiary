@@ -296,88 +296,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crowsnest"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "crossterm",
- "crowsnest-core",
- "crowsnest-herdr",
- "crowsnest-lsp",
- "crowsnest-tui",
- "crowsnest-vcs",
-]
-
-[[package]]
-name = "crowsnest-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ratatui",
- "ropey",
- "serde",
- "toml",
-]
-
-[[package]]
-name = "crowsnest-herdr"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "crowsnest-lsp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "crowsnest-syntax",
- "lsp-types",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "crowsnest-syntax"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "tree-sitter",
- "tree-sitter-c",
- "tree-sitter-cpp",
- "tree-sitter-go",
- "tree-sitter-highlight",
- "tree-sitter-python",
- "tree-sitter-rust",
-]
-
-[[package]]
-name = "crowsnest-tui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "crossterm",
- "crowsnest-core",
- "crowsnest-lsp",
- "crowsnest-syntax",
- "crowsnest-vcs",
- "libc",
- "lsp-types",
- "ratatui",
- "serde_json",
-]
-
-[[package]]
-name = "crowsnest-vcs"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "gix",
-]
-
-[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -534,6 +452,88 @@ name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
+
+[[package]]
+name = "dxdiary"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crossterm",
+ "dxdiary-core",
+ "dxdiary-herdr",
+ "dxdiary-lsp",
+ "dxdiary-tui",
+ "dxdiary-vcs",
+]
+
+[[package]]
+name = "dxdiary-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ratatui",
+ "ropey",
+ "serde",
+ "toml",
+]
+
+[[package]]
+name = "dxdiary-herdr"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "dxdiary-lsp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dxdiary-syntax",
+ "lsp-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "dxdiary-syntax"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tree-sitter",
+ "tree-sitter-c",
+ "tree-sitter-cpp",
+ "tree-sitter-go",
+ "tree-sitter-highlight",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+]
+
+[[package]]
+name = "dxdiary-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crossterm",
+ "dxdiary-core",
+ "dxdiary-lsp",
+ "dxdiary-syntax",
+ "dxdiary-vcs",
+ "libc",
+ "lsp-types",
+ "ratatui",
+ "serde_json",
+]
+
+[[package]]
+name = "dxdiary-vcs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gix",
+]
 
 [[package]]
 name = "either"

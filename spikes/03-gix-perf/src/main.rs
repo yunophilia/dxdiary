@@ -1,4 +1,4 @@
-//! Spike 0.3 — Is gix fast enough, and does its API cover what crowsnest needs?
+//! Spike 0.3 — Is gix fast enough, and does its API cover what dxdiary needs?
 //!
 //! Two questions, and the API one matters more:
 //!   API : can gix express merge-base fork-point diffing, working-tree status,

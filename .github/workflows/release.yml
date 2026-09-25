@@ -53,7 +53,7 @@ jobs:
           restore-keys: ${{ matrix.target }}-
 
       - name: Build toolchain image
-        run: docker build -t crowsnest-build .
+        run: docker build -t dxdiary-build .
 
       - name: Build
         run: |
@@ -63,21 +63,21 @@ jobs:
             -v "$PWD/.cache/target:/app/target" \
             -v "$PWD/.cache/registry:/usr/local/cargo/registry" \
             -v "$PWD/dist:/dist" \
-            crowsnest-build \
+            dxdiary-build \
             bash -c "
               cargo build --release --locked --target ${{ matrix.target }}
-              cp target/${{ matrix.target }}/release/crowsnest /dist/${{ matrix.target }}/
+              cp target/${{ matrix.target }}/release/dxdiary /dist/${{ matrix.target }}/
             "
 
       - name: Package
         run: |
-          tar czf crowsnest-${{ matrix.target }}.tar.gz \
-            -C dist/${{ matrix.target }} crowsnest
+          tar czf dxdiary-${{ matrix.target }}.tar.gz \
+            -C dist/${{ matrix.target }} dxdiary
 
       - uses: actions/upload-artifact@v4
         with:
-          name: crowsnest-${{ matrix.target }}
-          path: crowsnest-${{ matrix.target }}.tar.gz
+          name: dxdiary-${{ matrix.target }}
+          path: dxdiary-${{ matrix.target }}.tar.gz
 
   release:
     needs: build

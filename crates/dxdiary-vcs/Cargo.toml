@@ -1,0 +1,10 @@
+[package]
+name = "dxdiary-vcs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+# Pure Rust, and it already has blame and merge-base. Nothing outside this
+# crate imports gix -- see the Vcs trait.
+gix = { version = "0.86", features = ["blame", "status", "dirwalk", "revision"] }

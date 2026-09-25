@@ -2,5 +2,5 @@ target/
 dist/
 .cache/
 
-# Cargo.lock IS committed: crowsnest is an application, not a library, and the
+# Cargo.lock IS committed: dxdiary is an application, not a library, and the
 # Docker build runs `cargo build --locked`, which fails without it.

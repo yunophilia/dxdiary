@@ -1,4 +1,4 @@
-# Toolchain image for crowsnest. Build-only -- nothing ships from here, so
+# Toolchain image for dxdiary. Build-only -- nothing ships from here, so
 # there is no runtime stage and no layer-caching machinery.
 #
 # The image carries the cross toolchains; the source is bind-mounted at run
@@ -6,7 +6,7 @@
 # keeps the image static (rebuilt only when the toolchain changes) and makes
 # rebuilds as fast as a native cargo build.
 #
-# Linux only. crowsnest reads raw stdin with poll(2) for terminal capability
+# Linux only. dxdiary reads raw stdin with poll(2) for terminal capability
 # queries, and on Windows the use case is WSL, which is Linux -- so a Windows
 # target would mean a parallel console-API implementation for nobody.
 #

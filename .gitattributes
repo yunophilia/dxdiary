@@ -1,4 +1,4 @@
-# crowsnest targets Linux but is partly developed on Windows. Without this,
+# dxdiary targets Linux but is partly developed on Windows. Without this,
 # git would check shell scripts out with CRLF and they would fail on Linux with
 # "bad interpreter: /usr/bin/env bash^M".
 * text=auto eol=lf

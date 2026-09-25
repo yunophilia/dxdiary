@@ -1,0 +1,17 @@
+[package]
+name = "dxdiary-tui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+crossterm = { workspace = true }
+dxdiary-core = { path = "../dxdiary-core" }
+dxdiary-lsp = { path = "../dxdiary-lsp" }
+dxdiary-syntax = { path = "../dxdiary-syntax" }
+dxdiary-vcs = { path = "../dxdiary-vcs" }
+ratatui = { workspace = true }
+# poll(2), for the timed raw stdin reads in query.rs.
+libc = "0.2"
+lsp-types = "0.97"
+serde_json = "1"

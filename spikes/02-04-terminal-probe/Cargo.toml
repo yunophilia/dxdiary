@@ -7,5 +7,5 @@ edition = "2021"
 crossterm = "0.29.0"
 ratatui = "0.30.2"
 
-# Standalone: not a member of the crowsnest workspace.
+# Standalone: not a member of the dxdiary workspace.
 [workspace]

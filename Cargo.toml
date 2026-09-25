@@ -1,5 +1,5 @@
 [package]
-name = "crowsnest"
+name = "dxdiary"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.98"
@@ -21,11 +21,11 @@ toml = "0.9"
 [dependencies]
 anyhow = { workspace = true }
 crossterm = { workspace = true }
-crowsnest-core = { path = "crates/crowsnest-core" }
-crowsnest-herdr = { path = "crates/crowsnest-herdr" }
-crowsnest-lsp = { path = "crates/crowsnest-lsp" }
-crowsnest-tui = { path = "crates/crowsnest-tui" }
-crowsnest-vcs = { path = "crates/crowsnest-vcs" }
+dxdiary-core = { path = "crates/dxdiary-core" }
+dxdiary-herdr = { path = "crates/dxdiary-herdr" }
+dxdiary-lsp = { path = "crates/dxdiary-lsp" }
+dxdiary-tui = { path = "crates/dxdiary-tui" }
+dxdiary-vcs = { path = "crates/dxdiary-vcs" }
 
 [profile.release]
 # Line tables only, not full debug info. A panic in a raw-mode TUI still needs

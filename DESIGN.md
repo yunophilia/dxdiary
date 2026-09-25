@@ -1,9 +1,11 @@
-# crowsnest
+# dxdiary
 
 A terminal code viewer/editor in Rust, built to sit in a herdr pane and watch what
 the firstmate crew is doing.
 
-Nautical to match firstmate: the crow's nest is where you watch from.
+**dx** for the differentials -- what changed, against which baseline, per line. **diary**
+for the record it keeps of an agent fleet's work. A future diary in the sense that
+matters here: you read it to find out what happened before you have to live with it.
 
 ---
 
@@ -45,11 +47,11 @@ Two real environments, and it must run over SSH into either:
 | | Home | Office |
 |---|---|---|
 | Host OS | Windows 11 | Ubuntu Linux |
-| crowsnest runs on | WSL Ubuntu | Ubuntu |
+| dxdiary runs on | WSL Ubuntu | Ubuntu |
 | Terminal | WezTerm | WezTerm |
 | herdr | WSL | native |
 
-**crowsnest targets Linux only.** On the Windows box it runs under WSL, which is
+**dxdiary targets Linux only.** On the Windows box it runs under WSL, which is
 Linux, so the second environment is not really a second platform. A native Windows
 build would mean a parallel console-API implementation of the raw-stdin terminal
 queries in §1 for a case already covered — deliberately deferred, not forgotten.
@@ -85,7 +87,7 @@ decisions:
   environment genuinely is reliable: Windows Terminal sets `WT_SESSION` and is
   truecolor, and nothing else there is worth probing.
 
-  `crowsnest --caps` reports the answer, its source, and the terminal's identity.
+  `dxdiary --caps` reports the answer, its source, and the terminal's identity.
 
   **Measured through a real SSH hop** (spike 0.2): `COLORTERM` and `TERM_PROGRAM` are
   both unset on the far side, because `ssh` forwards only `TERM` without
@@ -113,7 +115,7 @@ decisions:
   223, which any real code pane exceeds. This also compounds Spike 0.2 — mouse events
   may have to survive SSH *and* herdr's multiplexing.
 - **LSP servers run server-side**, co-located with the code. Natural fit, no design
-  work needed, but `crowsnest doctor` must report the *remote* toolchain.
+  work needed, but `dxdiary doctor` must report the *remote* toolchain.
 - **Ship a static musl build.** One file, `scp`-able to any Linux box, no glibc
   version negotiation with whatever you land on. That is the primary artifact.
 
@@ -189,7 +191,7 @@ the static musl build; gitoxide is pure Rust and links clean. It also already ha
 blame and merge-base, the two non-trivial operations here.
 
 Cost: gix churns more than git2 across releases. Mitigation — **all git access goes
-behind a `Vcs` trait in `crowsnest-vcs`**, nothing else in the workspace imports
+behind a `Vcs` trait in `dxdiary-vcs`**, nothing else in the workspace imports
 `gix`. Swapping backends stays a one-crate change. Note the `gix` *CLI* is explicitly
 marked unstable; the `gix` *crate* is the supported surface.
 
@@ -210,15 +212,15 @@ One mechanism covers all seven clickable surfaces.
 ## 4. Workspace layout
 
 ```
-crowsnest/
+dxdiary/
 ├── crates/
-│   ├── crowsnest-core/     # buffer, ropes, view state, HitMap, config
-│   ├── crowsnest-vcs/      # Vcs trait + gix impl; status, diff, blame, merge-base
-│   ├── crowsnest-syntax/   # tree-sitter: highlight, outline, C nested-fn detection
-│   ├── crowsnest-lsp/      # client, server registry, per-language launch config
-│   ├── crowsnest-tui/      # ratatui widgets, panes, layout, mouse routing
-│   └── crowsnest-herdr/    # context JSON, event hooks, state dir
-├── crowsnest-plugin.toml   # herdr manifest
+│   ├── dxdiary-core/     # buffer, ropes, view state, HitMap, config
+│   ├── dxdiary-vcs/      # Vcs trait + gix impl; status, diff, blame, merge-base
+│   ├── dxdiary-syntax/   # tree-sitter: highlight, outline, C nested-fn detection
+│   ├── dxdiary-lsp/      # client, server registry, per-language launch config
+│   ├── dxdiary-tui/      # ratatui widgets, panes, layout, mouse routing
+│   └── dxdiary-herdr/    # context JSON, event hooks, state dir
+├── dxdiary-plugin.toml   # herdr manifest
 └── src/main.rs
 ```
 
@@ -263,7 +265,7 @@ back took **350 ms — over budget**. Writing a commit-graph took 0.93 s once an
 dropped that to **52.6 ms, a 6.7× win**; blame improved 1.6× as a side effect.
 
 So: on repo open, check for `.git/objects/info/commit-graph`. If absent, offer to
-write it in the background. It is the single highest-leverage thing crowsnest can do
+write it in the background. It is the single highest-leverage thing dxdiary can do
 for git performance, and it costs under a second.
 
 ### Status
@@ -289,7 +291,7 @@ resolve, top of file first. Never block a frame on blame.
 
 Note the API is lower-level than git2's `blame_file()` — it wants an odb handle,
 suspect commit, diff resource cache, and options assembled by hand. Wrap it once in
-`crowsnest-vcs`.
+`dxdiary-vcs`.
 
 ---
 
@@ -308,7 +310,7 @@ Registry maps language → server, with `--version` probing at startup and a gra
 
 "Built in" = bundled *configuration* and auto-detection, not vendored binaries.
 Shipping clangd/gopls/rust-analyzer inside the binary would be hundreds of MB and a
-licensing mess. Detect on `PATH`, document the install, offer a `crowsnest doctor`
+licensing mess. Detect on `PATH`, document the install, offer a `dxdiary doctor`
 that reports what's missing.
 
 Read-only phase needs only: `initialize`, `textDocument/didOpen`, `hover`,
@@ -322,21 +324,21 @@ until Phase 7 — which is a large simplification.
 The manifest contract, from herdr's plugin docs:
 
 ```toml
-id = "crowsnest"
-name = "crowsnest"
+id = "dxdiary"
+name = "dxdiary"
 version = "0.1.0"
 min_herdr_version = "..."
 
 [[panes]]
 id = "viewer"
-title = "crowsnest"
+title = "dxdiary"
 placement = "split"      # side-by-side with the agent terminal
-command = ["crowsnest", "--herdr"]
+command = ["dxdiary", "--herdr"]
 width = "45%"
 
 [[events]]
 on = "worktree.created"
-command = ["crowsnest-attach"]
+command = ["dxdiary-attach"]
 ```
 
 Two things make this fit firstmate specifically:
@@ -347,7 +349,7 @@ worktree it's looking at. The viewer binds to that worktree automatically instea
 guessing from `cwd`.
 
 **The `worktree.created` event hook.** When firstmate spawns a new crewmate,
-crowsnest can auto-attach or refresh. The viewer follows the fleet without manual
+dxdiary can auto-attach or refresh. The viewer follows the fleet without manual
 navigation — which is the actual daily win here.
 
 Also use: `HERDR_PLUGIN_STATE_DIR` to persist per-worktree cursor/scroll/baseline so
@@ -378,7 +380,7 @@ These four can each invalidate a chunk of the design. Throwaway code, answers on
 **Phase 0 is complete.** All four spikes pass; see `spikes/FINDINGS.md`.
 
 ### ~~Phase 1 — Skeleton~~ — **done**
-Workspace (`crowsnest-core`, `crowsnest-tui`, binary), ratatui event loop, file tree
+Workspace (`dxdiary-core`, `dxdiary-tui`, binary), ratatui event loop, file tree
 + content pane, `HitMap` and mouse routing, config with theming. Renders a repo,
 click-navigable, no git yet. 38 tests; clippy and fmt clean.
 
@@ -392,13 +394,13 @@ Two things worth carrying forward:
   SSH connection.
 
 ### ~~Phase 2 — Git status + diff~~ — **done**
-`crowsnest-vcs` with the `Vcs` trait and a gix backend; status buckets; `DiffBaseline`
+`dxdiary-vcs` with the `Vcs` trait and a gix backend; status buckets; `DiffBaseline`
 with fork-point detection; commit-graph check and `W` to write one; badges in the tree
 with directory roll-up; branch and counts in the status bar; `b` / `c` / `]` / `[`.
 80 tests, including integration tests that build real repositories with the git CLI —
 merge-base is cross-checked against `git merge-base` rather than only against itself.
 
-Plus the hunk renderer: `crowsnest-vcs::diff` assembles unified hunks from gix's
+Plus the hunk renderer: `dxdiary-vcs::diff` assembles unified hunks from gix's
 slider-heuristic line diff, and the content pane renders them with dual line-number
 gutters. Opening a changed file lands on its diff; `d` toggles back to the file.
 Changing baseline recomputes the open diff. 111 tests.
@@ -418,7 +420,7 @@ Three things worth knowing:
   leaves a stale offset in place with blank rows stranded at the bottom.
 
 ### ~~Phase 3 — Syntax~~ — **done**
-`crowsnest-syntax`: tree-sitter for C, C++, Go, Python, and Rust; per-line character
+`dxdiary-syntax`: tree-sitter for C, C++, Go, Python, and Rust; per-line character
 spans mapped to eleven theme roles; and the nested-function detector that §2's
 diagnostic filter needs. Both the file view and the diff view are highlighted.
 
@@ -440,7 +442,7 @@ Grammars disagree about capture names (Rust has no `number`; integers are `const
 so roles are matched on the capture prefix rather than the full name.
 
 ### ~~Phase 4 — LSP~~ — **done**
-`crowsnest-lsp`: JSON-RPC over stdio, a server registry with `crowsnest --doctor`,
+`dxdiary-lsp`: JSON-RPC over stdio, a server registry with `dxdiary --doctor`,
 and the C diagnostic filter from §2. Diagnostics show as a gutter marker; `K` asks
 for hover. Verified end to end against a real rust-analyzer, and against a mock
 server for everything a real one cannot be relied on to do.
@@ -464,7 +466,7 @@ and `doctor` reports three states — ok, missing, and present-but-broken — wi
 command to fix each.
 
 ### ~~Phase 5 — Blame~~ — **done**
-`crowsnest-vcs::blame` over `gix::blame`, rendered as a gutter toggled with `a`.
+`dxdiary-vcs::blame` over `gix::blame`, rendered as a gutter toggled with `a`.
 
 Computed **on a background thread**, as §5 required: spike 0.3 measured 543 ms for a
 1,931-line file and 2.5 s for a 7,858-line one, and a commit-graph does not help. The
@@ -483,13 +485,13 @@ Click-to-commit is not implemented — it needs a commit-detail view that does n
 yet.
 
 ### ~~Phase 6 — herdr plugin~~ — **done**
-`crowsnest-plugin.toml` declares a split pane, a zoomed pane, two actions, and a
-`worktree.created` hook. `crowsnest-herdr` reads `HERDR_PLUGIN_CONTEXT_JSON`.
+`dxdiary-plugin.toml` declares a split pane, a zoomed pane, two actions, and a
+`worktree.created` hook. `dxdiary-herdr` reads `HERDR_PLUGIN_CONTEXT_JSON`.
 
 **The worktree overrides the working directory**, and that is the whole feature. A
 plugin pane inherits *herdr's* cwd, not the crewmate's, so trusting cwd would show the
 wrong tree. Verified by launching from `/tmp` with only the context JSON pointing at a
-worktree: crowsnest opened the worktree.
+worktree: dxdiary opened the worktree.
 
 The context parser tries `worktree`, `worktree_path`, and `cwd`, and accepts either a
 string or an object with a `path` — herdr has spelled it differently across versions,
@@ -501,11 +503,11 @@ two crewmates working on `feature` under different parents would otherwise colli
 send you to the wrong file.
 
 ### ~~Phase 7 — Editing~~ — **done**
-Rope-backed buffer (`crowsnest-core::buffer`), grouped undo/redo, modal editing, and
+Rope-backed buffer (`dxdiary-core::buffer`), grouped undo/redo, modal editing, and
 an atomic save. `i` enters insert, `Esc` leaves, `u`/`Ctrl+R` undo and redo, `x` and
 `D` delete a character and a line, `Ctrl+S` writes.
 
-**Modal, not always-insert.** crowsnest is a reviewer first: `d`, `b`, `c`, and `a`
+**Modal, not always-insert.** dxdiary is a reviewer first: `d`, `b`, `c`, and `a`
 are single-key commands, and making them all modifiers to free the alphabet would be
 the wrong trade for the common case. `Ctrl+C` quits from either mode, so a session is
 always escapable.
@@ -520,7 +522,7 @@ visible immediately and there is never a second copy to drift.
 
 **Save writes a sibling temp file and renames.** An interrupted save cannot leave a
 truncated source file behind, and rename within a directory is atomic everywhere
-crowsnest runs.
+dxdiary runs.
 
 A goal column is preserved across short lines — moving down through a short line and
 back returns to the original column, which is the thing naive implementations get

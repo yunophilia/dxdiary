@@ -1,11 +1,14 @@
-# crowsnest
+# dxdiary
+
+*dx*, the differentials — what changed, against which baseline, per line. *diary*, the
+record of what an agent fleet did to your tree.
 
 A terminal code viewer for reviewing what your agents did — git status, branch-vs-fork-point
 diffs, per-line blame, syntax highlighting and LSP — running as a herdr pane next to
 the agent terminals.
 
 Built to sit alongside [firstmate](https://github.com/kunchenguid/firstmate), which
-dispatches each crewmate into its own git worktree. crowsnest binds to that worktree
+dispatches each crewmate into its own git worktree. dxdiary binds to that worktree
 and follows the fleet.
 
 **Status: all phases done.** Tree and content panes, mouse-clickable, themed, git-aware —
@@ -99,7 +102,7 @@ has this branch actually changed?" The base is resolved automatically, preferrin
 branch's upstream, then `main`/`master`/`develop`/`trunk` (local or on `origin`), then
 the nearest tag.
 
-Not a git repository? crowsnest opens anyway as a plain file browser.
+Not a git repository? dxdiary opens anyway as a plain file browser.
 
 Everything is reachable from the keyboard alone. Spike 0.2 confirmed herdr forwards
 mouse events into plugin panes, and over SSH, but an unknown terminal at the far end
@@ -121,7 +124,7 @@ terminal           WezTerm 20240203-110809-5046fc22
 kitty keyboard     no — legacy key encoding
 ```
 
-crowsnest asks the terminal via XTGETTCAP rather than reading `COLORTERM`, because
+dxdiary asks the terminal via XTGETTCAP rather than reading `COLORTERM`, because
 environment variables do not survive SSH. The practical benefit: a wrong or missing
 `TERM` cannot downgrade your colours, since the terminal is answering for itself.
 
@@ -135,9 +138,9 @@ an automated harness driving `wezterm-mux-server` headlessly under both bash and
 
 ## Setup
 
-**crowsnest is Linux only.** On Windows, run it under WSL — which is Linux, so
+**dxdiary is Linux only.** On Windows, run it under WSL — which is Linux, so
 nothing is lost. A native Windows build would mean a parallel console-API
-implementation of the raw-stdin terminal queries in `crowsnest-tui/src/query.rs`,
+implementation of the raw-stdin terminal queries in `dxdiary-tui/src/query.rs`,
 for a use case already covered.
 
 ### Native toolchain — for fast local iteration
@@ -183,7 +186,7 @@ dependencies, no glibc version negotiation with whatever box you land on.
 
 ### Git
 
-crowsnest needs a modern git for worktree support — as does firstmate, which depends
+dxdiary needs a modern git for worktree support — as does firstmate, which depends
 on `git worktree move` / `remove` and reliable `list --porcelain` (all 2.17+).
 
 ```bash
@@ -194,7 +197,7 @@ sudo apt install git
 
 ## A performance note that will bite you
 
-**Never run crowsnest across a filesystem boundary.** Measured on the same repo, same
+**Never run dxdiary across a filesystem boundary.** Measured on the same repo, same
 machine — WSL's 9p bridge (`/mnt/e/...`) versus native ext4:
 
 | Operation | over 9p | native | |
@@ -203,10 +206,10 @@ machine — WSL's 9p bridge (`/mnt/e/...`) versus native ext4:
 | diff merge-base..HEAD | 162.39 ms | 0.63 ms | **258×** |
 | status | 689.08 ms | 122.61 ms | 5.6× |
 
-Run crowsnest where the code lives. Over SSH, that means on the remote. This is the
+Run dxdiary where the code lives. Over SSH, that means on the remote. This is the
 main reason the architecture is SSH-first.
 
-Related: crowsnest will offer to write a git commit-graph on first open. On an
+Related: dxdiary will offer to write a git commit-graph on first open. On an
 80k-commit repo this costs under a second once and makes merge-base **6.7× faster**.
 Say yes.
 
@@ -215,19 +218,19 @@ Say yes.
 ## Repository layout
 
 ```
-crowsnest/
+dxdiary/
 ├── DESIGN.md                     # the plan, phases, risks
 ├── Dockerfile                    # cross-compilation toolchain image
 ├── scripts/build.sh              # drives the target matrix
 ├── .github/workflows/release.yml # checks, then the same Dockerfile
-├── crowsnest-plugin.toml         # herdr plugin manifest
+├── dxdiary-plugin.toml         # herdr plugin manifest
 ├── crates/
-│   ├── crowsnest-core/           # model: tree, document, buffer, hit map, config
-│   ├── crowsnest-vcs/            # Vcs trait + gix backend (the only gix user)
-│   ├── crowsnest-syntax/         # tree-sitter highlighting, C nested-function scan
-│   ├── crowsnest-lsp/            # JSON-RPC client, server registry, C filter
-│   ├── crowsnest-herdr/          # plugin context: worktree binding, state dir
-│   └── crowsnest-tui/            # ratatui panes, event loop, terminal queries
+│   ├── dxdiary-core/           # model: tree, document, buffer, hit map, config
+│   ├── dxdiary-vcs/            # Vcs trait + gix backend (the only gix user)
+│   ├── dxdiary-syntax/         # tree-sitter highlighting, C nested-function scan
+│   ├── dxdiary-lsp/            # JSON-RPC client, server registry, C filter
+│   ├── dxdiary-herdr/          # plugin context: worktree binding, state dir
+│   └── dxdiary-tui/            # ratatui panes, event loop, terminal queries
 ├── spikes/
 │   ├── FINDINGS.md               # what the spikes settled — read this
 │   ├── 01-treesitter-c-nested/   # PASS — tree-sitter vs GCC nested functions

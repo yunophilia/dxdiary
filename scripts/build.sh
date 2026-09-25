@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build crowsnest for one or more targets inside the toolchain container.
+# Build dxdiary for one or more targets inside the toolchain container.
 # Docker is the only host requirement -- no Rust, no C compiler.
 #
 #   ./scripts/build.sh                  # every target
@@ -12,12 +12,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-IMAGE=crowsnest-build
+IMAGE=dxdiary-build
 # Named volumes, not host directories: cargo's target dir and registry are
 # write-heavy, and on Docker Desktop a bind mount crosses a VM boundary that
 # makes them crawl. Only the source tree and dist/ are bind-mounted.
-VOL_TARGET=crowsnest-target
-VOL_REGISTRY=crowsnest-registry
+VOL_TARGET=dxdiary-target
+VOL_REGISTRY=dxdiary-registry
 
 # Linux only -- see the Dockerfile for why there is no Windows target.
 declare -A TARGETS=(
@@ -52,7 +52,7 @@ for alias in "${selected[@]}"; do
         set -eu
         cargo build --release --locked --target '$target'
         # target/ is a volume the host cannot see; copy results out to /dist.
-        cp 'target/$target/release/crowsnest' '/dist/$target/'
+        cp 'target/$target/release/dxdiary' '/dist/$target/'
       "; then
     ls -lh "dist/$target" 2>/dev/null || true
   else

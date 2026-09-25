@@ -116,14 +116,14 @@ field to distinguish definition from reference. Same trap applies to
 
 ## Spike 0.3 — gix performance and API coverage — **PASS, with two caveats**
 
-**API coverage: complete.** Every operation crowsnest needs exists in gix 0.86:
+**API coverage: complete.** Every operation dxdiary needs exists in gix 0.86:
 `repo.merge_base()`, `repo.diff_tree_to_tree()`, `repo.status().into_index_worktree_iter()`,
 and `gix::blame::file()`. The spike compiled clean on the first try against the real
 API. No gaps, no need for shelling out to `git`.
 
 One ergonomic note: **blame is low-level.** Unlike git2's `repo.blame_file()`, gix
 wants an odb handle, a suspect commit, a diff resource cache, and an options struct
-assembled by hand. Budget an afternoon wrapping it in `crowsnest-vcs`.
+assembled by hand. Budget an afternoon wrapping it in `dxdiary-vcs`.
 
 ### Perf: the filesystem dominated everything
 
@@ -140,9 +140,9 @@ the WSL-native ext4:
 *(Gamma-Music-Manager, 1122 commits, 183 changed paths.)*
 
 **This is a design-level finding, not a benchmarking artifact.** Any cross-filesystem
-access — Windows crowsnest against a WSL path, or the reverse — collapses
+access — Windows dxdiary against a WSL path, or the reverse — collapses
 performance. It independently justifies the SSH-first architecture in §1: run
-crowsnest *where the code lives*, never across a filesystem bridge.
+dxdiary *where the code lives*, never across a filesystem bridge.
 
 ### Scaling: git/git, 81,966 commits, 315 MB
 
@@ -168,7 +168,7 @@ The repo had no commit-graph. Writing one took **0.93 s** and produced a 4.6 MB 
 | blame `rebase.c` | 892 ms | **543 ms** | 1.6× |
 | blame `diff.c` | 2339 ms | 2467 ms | no help |
 
-**Action for the design:** crowsnest should ensure a commit-graph exists — check on
+**Action for the design:** dxdiary should ensure a commit-graph exists — check on
 repo open, offer to write it in the background. Sub-second one-time cost, and it
 takes merge-base comfortably inside budget on an 80k-commit repo. Blame benefits too,
 since it walks commits.
@@ -291,7 +291,7 @@ out at 234×29.
 The SSH hop changes nothing about mouse forwarding — SSH is an 8-bit clean byte pipe,
 so SGR reports cross it untouched, coordinates and all.
 
-What it does destroy is the environment. Running `crowsnest --caps` through the hop:
+What it does destroy is the environment. Running `dxdiary --caps` through the hop:
 
 ```
 colour depth       TrueColor

@@ -88,7 +88,7 @@ Things to look at while it's running:
   management and not forwarding. Check whether herdr has a config option to pass
   mouse through to plugin panes; if not, this is an upstream ask.
 - **Events arrive but coordinates are offset** — herdr is not accounting for pane
-  origin. Workable: crowsnest can correct with a fixed offset, but it needs detecting.
+  origin. Workable: dxdiary can correct with a fixed offset, but it needs detecting.
 - **Coordinates freeze or wrap around column 223** — X10 encoding. crossterm requests
   SGR, so this would mean something in the chain is downgrading it. Fatal for wide
   panes.

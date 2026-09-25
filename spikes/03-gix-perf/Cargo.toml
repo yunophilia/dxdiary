@@ -9,5 +9,5 @@ gix = { version = "0.86.0", features = ["blame", "status", "dirwalk", "revision"
 [profile.release]
 debug = true
 
-# Standalone: not a member of the crowsnest workspace.
+# Standalone: not a member of the dxdiary workspace.
 [workspace]
