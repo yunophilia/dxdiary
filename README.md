@@ -42,7 +42,20 @@ cargo run -- /path/to/repo
 | `tab` | switch pane |
 | `g` / `G` | top / bottom |
 | `r` | refresh tree and git state |
-| `q` / `esc` | quit |
+| `q` | quit |
+| `esc` | clear the search, or quit when there is nothing to clear |
+
+Finding things:
+
+| | |
+|---|---|
+| `/` | search the open file — live as you type, `esc` cancels and puts the cursor back |
+| `n` / `N` | next / previous match, wrapping |
+| `:` | go to a line number |
+
+Search is literal, not regex, and smart-cased: an all-lowercase query matches any
+case, and typing a capital means you meant it. Matches are shaded, the one you are on
+more strongly, and the count sits in the status bar.
 
 Editing:
 

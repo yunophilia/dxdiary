@@ -540,6 +540,32 @@ Arming is per action, so a refused quit does not license the next open. `ctrl-c`
 remains unconditional — a runaway session must always be escapable, and that is the
 one key documented as such.
 
+### Phase 8 — finding things — **done**
+
+`/` searches the open file, live as you type, with `n`/`N` to step and wrapping
+announced rather than silent. `:` goes to a line. Literal matching, not regex: the
+question being asked is "where else does this symbol appear", which is what `/` in
+`less` has always answered without a regex syntax to get wrong. Regex can come later
+behind its own prefix if it earns one.
+
+Smart case, as vim and ripgrep do it. Case folding is compared per character rather
+than by lowercasing whole lines, because folding can change a string's length and
+every offset here is an index into the original.
+
+Matches shade the **background**. A foreground highlight would have to fight the
+syntax colour that tells you what you are looking at.
+
+Both the match offsets and the syntax spans are raw-character indices mapped through
+one column table from `render_line_mapped`, which is what makes them agree on a
+tab-indented line.
+
+A prompt owns the status line while it is open, as in `less` and vim, and draws its
+own caret -- the terminal's cursor is parked out of the way in raw mode.
+
+`esc` dismisses before it quits: with a search on screen the reflex is to press it to
+clear the highlight, and losing the session to that reflex would be its own small
+disaster. `q` stays unconditional.
+
 ## 9. Risks
 
 | Risk | Severity | Status |

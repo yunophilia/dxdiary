@@ -41,6 +41,8 @@ struct Palette {
     syn_punctuation: Color,
     syn_variable: Color,
     syn_attribute: Color,
+    match_bg: Color,
+    match_current_bg: Color,
 }
 
 impl Palette {
@@ -71,6 +73,8 @@ impl Palette {
             syn_punctuation: theme.syn_punctuation.to_color(depth),
             syn_variable: theme.syn_variable.to_color(depth),
             syn_attribute: theme.syn_attribute.to_color(depth),
+            match_bg: theme.match_bg.to_color(depth),
+            match_current_bg: theme.match_current_bg.to_color(depth),
         }
     }
 }
@@ -137,16 +141,30 @@ fn role_color(role: dxdiary_syntax::Role, p: &Palette) -> Color {
 /// `spans` are in character offsets against the *untruncated* line, so the
 /// horizontal scroll window is applied here rather than by the caller — doing
 /// it beforehand would leave the offsets pointing at the wrong characters.
-fn highlighted_spans(
-    text: &str,
-    spans: &[dxdiary_syntax::Span],
-    // Raw-character index to display column, from `render_line_mapped`.
-    offsets: &[usize],
+/// Search matches on this line, as raw-character ranges plus whether each is
+/// the selected one.
+type Marks = [(usize, usize, bool)];
+
+/// Everything one rendered line needs beyond its text.
+struct LineStyle<'a> {
+    spans: &'a [dxdiary_syntax::Span],
+    /// Raw-character index to display column, from `render_line_mapped`.
+    offsets: &'a [usize],
+    marks: &'a Marks,
     scroll_x: usize,
     width: usize,
     base: Style,
-    p: &Palette,
-) -> Vec<Span<'static>> {
+}
+
+fn highlighted_spans(text: &str, s: &LineStyle, p: &Palette) -> Vec<Span<'static>> {
+    let LineStyle {
+        spans,
+        offsets,
+        marks,
+        scroll_x,
+        width,
+        base,
+    } = *s;
     let chars: Vec<char> = text.chars().collect();
     let end = chars.len().min(scroll_x.saturating_add(width));
     if scroll_x >= chars.len() {
@@ -169,28 +187,51 @@ fn highlighted_spans(
         }
     }
 
+    // Search matches paint the background, so they survive whatever the
+    // syntax colour does to the foreground.
+    let mut backs: Vec<Option<Color>> = vec![None; chars.len()];
+    for &(start, stop, current) in marks {
+        let color = if current {
+            p.match_current_bg
+        } else {
+            p.match_bg
+        };
+        for slot in backs
+            .iter_mut()
+            .take(column(stop).min(chars.len()))
+            .skip(column(start).min(chars.len()))
+        {
+            *slot = Some(color);
+        }
+    }
+
+    let style_of = |fg: Option<Color>, bg: Option<Color>| {
+        let s = fg.map_or(base, |col| base.fg(col));
+        bg.map_or(s, |col| s.bg(col))
+    };
+
     let mut out: Vec<Span<'static>> = Vec::new();
     let mut run = String::new();
-    let mut run_color: Option<Color> = colors.get(scroll_x).copied().flatten();
+    let mut run_style = (
+        colors.get(scroll_x).copied().flatten(),
+        backs.get(scroll_x).copied().flatten(),
+    );
 
     for i in scroll_x..end {
-        let c = colors[i];
-        if c != run_color && !run.is_empty() {
+        let c = (colors[i], backs[i]);
+        if c != run_style && !run.is_empty() {
             out.push(Span::styled(
                 std::mem::take(&mut run),
-                run_color.map_or(base, |col| base.fg(col)),
+                style_of(run_style.0, run_style.1),
             ));
-            run_color = c;
+            run_style = c;
         } else if run.is_empty() {
-            run_color = c;
+            run_style = c;
         }
         run.push(chars[i]);
     }
     if !run.is_empty() {
-        out.push(Span::styled(
-            run,
-            run_color.map_or(base, |col| base.fg(col)),
-        ));
+        out.push(Span::styled(run, style_of(run_style.0, run_style.1)));
     }
     out
 }
@@ -292,11 +333,15 @@ fn diff_lines<'a>(
                 // what the eye needs first, and syntax colour would bury it.
                 Some(s) if line.kind == LineKind::Context => spans.extend(highlighted_spans(
                     &body,
-                    s,
-                    &offsets,
-                    app.doc_scroll_x,
-                    text_width,
-                    style,
+                    &LineStyle {
+                        spans: s,
+                        offsets: &offsets,
+                        // Search works on the file view, which it switches to.
+                        marks: &[],
+                        scroll_x: app.doc_scroll_x,
+                        width: text_width,
+                        base: style,
+                    },
                     p,
                 )),
                 _ => spans.push(Span::styled(
@@ -453,7 +498,8 @@ pub(crate) fn render_content(f: &mut Frame, area: Rect, app: &App, hits: &mut Hi
     let dirty = if app.is_dirty() { " ●" } else { "" };
     let mode = match app.mode {
         crate::app::Mode::Insert => "  INSERT",
-        crate::app::Mode::Normal => "",
+        // A prompt announces itself on the status line, not in the title.
+        crate::app::Mode::Normal | crate::app::Mode::Prompt => "",
     };
     let title = match (app.view, &app.diff) {
         (crate::app::ContentView::Diff, Some(d)) => {
@@ -562,25 +608,26 @@ pub(crate) fn render_content(f: &mut Frame, area: Rect, app: &App, hits: &mut Hi
                     }
                     spans.push(severity);
                     spans.push(number);
-                    match app.doc_spans.get(n) {
-                        Some(s) => spans.extend(highlighted_spans(
-                            &expanded,
-                            s,
-                            &offsets,
-                            app.doc_scroll_x,
-                            text_width,
+                    // One path whether or not the file has a language: an
+                    // unhighlighted file still has to show search matches.
+                    let marks: Vec<(usize, usize, bool)> = app
+                        .search
+                        .as_ref()
+                        .map(|s| s.on_line(n).map(|(m, cur)| (m.start, m.end, cur)).collect())
+                        .unwrap_or_default();
+                    let empty: Vec<dxdiary_syntax::Span> = Vec::new();
+                    spans.extend(highlighted_spans(
+                        &expanded,
+                        &LineStyle {
+                            spans: app.doc_spans.get(n).unwrap_or(&empty),
+                            offsets: &offsets,
+                            marks: &marks,
+                            scroll_x: app.doc_scroll_x,
+                            width: text_width,
                             base,
-                            &p,
-                        )),
-                        None => spans.push(Span::styled(
-                            expanded
-                                .chars()
-                                .skip(app.doc_scroll_x)
-                                .take(text_width)
-                                .collect::<String>(),
-                            base,
-                        )),
-                    }
+                        },
+                        &p,
+                    ));
 
                     let line = Line::from(spans);
                     if current && app.focus == PaneId::Content {
@@ -598,6 +645,19 @@ pub(crate) fn render_content(f: &mut Frame, area: Rect, app: &App, hits: &mut Hi
 
 pub(crate) fn render_status(f: &mut Frame, area: Rect, app: &App) {
     let p = Palette::new(&app.config.theme, app.depth);
+
+    // A prompt owns the whole line while it is open, the way `less` and vim
+    // do it: there is nothing to glance at while you are typing into it.
+    if let Some(line) = app.prompt_line() {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                line,
+                Style::default().fg(p.fg).add_modifier(Modifier::BOLD),
+            ))),
+            area,
+        );
+        return;
+    }
 
     let mut spans = Vec::new();
 

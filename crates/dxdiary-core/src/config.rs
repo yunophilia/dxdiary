@@ -109,6 +109,12 @@ pub struct Theme {
     pub syn_punctuation: Rgb,
     pub syn_variable: Rgb,
     pub syn_attribute: Rgb,
+    // --- search ---------------------------------------------------------
+    /// Behind every match of the current search, and behind the selected one.
+    /// Backgrounds rather than foregrounds: a match has to be visible without
+    /// destroying the syntax colour that tells you what you are looking at.
+    pub match_bg: Rgb,
+    pub match_current_bg: Rgb,
 }
 
 impl Default for Theme {
@@ -140,6 +146,8 @@ impl Default for Theme {
             syn_punctuation: Rgb(0x9a, 0xa5, 0xce),
             syn_variable: Rgb(0xc0, 0xca, 0xf5),
             syn_attribute: Rgb(0xe0, 0xaf, 0x68),
+            match_bg: Rgb(0x3f, 0x37, 0x20),
+            match_current_bg: Rgb(0x8f, 0x6a, 0x1e),
         }
     }
 }

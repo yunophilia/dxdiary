@@ -40,6 +40,37 @@ const CHANGE_DEBOUNCE: Duration = Duration::from_millis(150);
 pub enum Mode {
     Normal,
     Insert,
+    /// Typing into the status line -- a search or a line number.
+    Prompt,
+}
+
+/// What an open prompt is collecting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Asking {
+    Search,
+    Goto,
+}
+
+impl Asking {
+    /// The character that opened it, shown as the prompt's prefix so there is
+    /// never a doubt about which one is open.
+    fn prefix(self) -> char {
+        match self {
+            Asking::Search => '/',
+            Asking::Goto => ':',
+        }
+    }
+}
+
+/// An open prompt.
+struct Prompt {
+    asking: Asking,
+    input: String,
+    /// Cursor line and scroll offset when it opened.
+    ///
+    /// Search previews as you type, which moves both; cancelling has to put
+    /// them back or `/` followed by `esc` would quietly relocate you.
+    restore: (usize, usize),
 }
 
 /// An action that would throw away unsaved edits, asked for once.
@@ -110,6 +141,12 @@ pub struct App {
     /// The destructive action that was refused because of unsaved edits.
     discard_armed: Option<Discard>,
 
+    // --- finding --------------------------------------------------------
+    /// The live search, if one is running. Public so the pane can shade
+    /// matches.
+    pub search: Option<dxdiary_core::Search>,
+    prompt: Option<Prompt>,
+
     // --- syntax ---------------------------------------------------------
     highlighter: dxdiary_syntax::Highlighter,
     /// Detected language of the open file, if it is one dxdiary knows.
@@ -176,6 +213,8 @@ impl App {
             hover_id: None,
             lsp_change_at: None,
             discard_armed: None,
+            search: None,
+            prompt: None,
             highlighter: dxdiary_syntax::Highlighter::new(),
             language: None,
             doc_spans: Vec::new(),
@@ -382,6 +421,9 @@ impl App {
             self.quit = true;
             return true;
         }
+        if self.mode == Mode::Prompt {
+            return self.on_prompt_key(k);
+        }
         if self.mode == Mode::Insert {
             return self.on_insert_key(k);
         }
@@ -510,12 +552,27 @@ impl App {
         }
 
         match k.code {
-            KeyCode::Char('q') | KeyCode::Esc => {
+            KeyCode::Char('q') => {
                 if self.may_discard(Discard::Quit) {
                     self.quit = true;
                 }
                 true
             }
+            // Esc dismisses before it quits. With a search on screen the
+            // reflex is to press it to clear the highlight, and losing the
+            // session to that would be its own small disaster.
+            KeyCode::Esc => {
+                if self.search.take().is_some() {
+                    self.status = "search cleared".into();
+                } else if self.may_discard(Discard::Quit) {
+                    self.quit = true;
+                }
+                true
+            }
+            KeyCode::Char('/') => self.begin_prompt(Asking::Search),
+            KeyCode::Char(':') => self.begin_prompt(Asking::Goto),
+            KeyCode::Char('n') => self.step_search(true),
+            KeyCode::Char('N') => self.step_search(false),
             KeyCode::Tab | KeyCode::BackTab => {
                 self.focus = match self.focus {
                     PaneId::Tree => PaneId::Content,
@@ -1142,6 +1199,181 @@ impl App {
             })
     }
 
+    // ------------------------------------------------------------- finding
+
+    /// The prompt as it should appear on the status line, if one is open.
+    pub fn prompt_line(&self) -> Option<String> {
+        let prompt = self.prompt.as_ref()?;
+        // A block for the caret: the terminal's own cursor is parked out of
+        // the way in raw mode, so the prompt has to draw its own.
+        Some(format!(
+            "{}{}\u{2588}",
+            prompt.asking.prefix(),
+            prompt.input
+        ))
+    }
+
+    fn begin_prompt(&mut self, asking: Asking) -> bool {
+        if self.text_line_count() == 0 {
+            self.status = "no file open".into();
+            return true;
+        }
+        // Both answers address file lines, so neither means anything against
+        // a diff. Blame sets the same precedent.
+        self.view = ContentView::File;
+        self.focus = PaneId::Content;
+        self.mode = Mode::Prompt;
+        self.prompt = Some(Prompt {
+            asking,
+            input: String::new(),
+            restore: (self.doc_line, self.doc_scroll_y),
+        });
+        true
+    }
+
+    fn on_prompt_key(&mut self, k: KeyEvent) -> bool {
+        let Some(prompt) = &mut self.prompt else {
+            self.mode = Mode::Normal;
+            return true;
+        };
+        match k.code {
+            KeyCode::Esc => {
+                let (line, scroll) = prompt.restore;
+                self.prompt = None;
+                self.mode = Mode::Normal;
+                self.search = None;
+                self.doc_line = line;
+                self.doc_scroll_y = scroll;
+                self.status = "cancelled".into();
+            }
+            KeyCode::Enter => {
+                let Prompt {
+                    asking,
+                    input,
+                    restore,
+                } = self.prompt.take().expect("just matched");
+                self.mode = Mode::Normal;
+                match asking {
+                    Asking::Search => self.commit_search(&input, restore.0),
+                    Asking::Goto => self.commit_goto(&input),
+                }
+            }
+            KeyCode::Backspace => {
+                prompt.input.pop();
+                self.preview();
+            }
+            KeyCode::Char(c) => {
+                prompt.input.push(c);
+                self.preview();
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Update as the query is typed, so a search is live rather than modal.
+    fn preview(&mut self) {
+        let Some(prompt) = &self.prompt else { return };
+        if prompt.asking != Asking::Search {
+            return;
+        }
+        let (query, from) = (prompt.input.clone(), prompt.restore.0);
+        self.run_search(&query, from);
+    }
+
+    fn commit_search(&mut self, query: &str, from: usize) {
+        if query.is_empty() {
+            self.search = None;
+            self.status = "search cancelled".into();
+            return;
+        }
+        let n = self.run_search(query, from);
+        self.status = if n == 0 {
+            format!("no match for {query:?}")
+        } else {
+            format!("{n} match{} for {query:?} · n/N to step", plural(n))
+        };
+    }
+
+    /// Search the open file and select the first hit at or after `from`.
+    ///
+    /// Returns the number of matches. An empty query or no match leaves
+    /// nothing highlighted rather than an empty selection, so the pane never
+    /// has to reason about a search that matches nothing.
+    fn run_search(&mut self, query: &str, from: usize) -> usize {
+        if query.is_empty() {
+            self.search = None;
+            return 0;
+        }
+        let lines = self.view_lines().unwrap_or_default();
+        let mut found = dxdiary_core::Search::new(&lines, query);
+        if found.is_empty() {
+            self.search = None;
+            return 0;
+        }
+        found.select_from(from);
+        let n = found.len();
+        self.search = Some(found);
+        self.jump_to_match();
+        n
+    }
+
+    fn commit_goto(&mut self, input: &str) {
+        let trimmed = input.trim();
+        match trimmed.parse::<usize>() {
+            Ok(0) | Err(_) if !trimmed.is_empty() => {
+                self.status = format!("not a line number: {trimmed:?}")
+            }
+            Ok(n) => {
+                let total = self.text_line_count();
+                let target = n.min(total.max(1)) - 1;
+                self.doc_line = target;
+                self.clamp_content();
+                self.status = if n > total {
+                    format!("line {n} is past the end · {total} lines")
+                } else {
+                    format!("line {n}")
+                };
+            }
+            Err(_) => self.status = "cancelled".into(),
+        }
+    }
+
+    fn step_search(&mut self, forward: bool) -> bool {
+        let Some(search) = &mut self.search else {
+            self.status = "nothing to step through · / to search".into();
+            return true;
+        };
+        if search.is_empty() {
+            self.status = "no matches".into();
+            return true;
+        }
+        let wrapped = search.step(forward);
+        let at = search.current + 1;
+        let total = search.len();
+        self.jump_to_match();
+        self.status = if wrapped {
+            format!("{at}/{total} · wrapped")
+        } else {
+            format!("{at}/{total}")
+        };
+        true
+    }
+
+    /// Put the cursor on the selected match.
+    fn jump_to_match(&mut self) {
+        let Some(m) = self.search.as_ref().and_then(|s| s.selected()) else {
+            return;
+        };
+        self.doc_line = m.line;
+        // Scroll sideways far enough that the match is on screen, which a
+        // long line otherwise hides off to the right.
+        if let Some(buf) = &mut self.buffer {
+            buf.move_to(m.line, m.start);
+        }
+        self.clamp_content();
+    }
+
     // ------------------------------------------------------------- editing
 
     /// Enter insert mode (`i`).
@@ -1405,7 +1637,8 @@ impl App {
 
     // ------------------------------------------------------------- helpers
 
-    pub(crate) fn text_line_count(&self) -> usize {
+    /// Lines in the open text file, or 0 when there is no text open.
+    pub fn text_line_count(&self) -> usize {
         match &self.doc {
             Some(Document::Text(d)) => d.line_count(),
             _ => 0,
@@ -1543,6 +1776,15 @@ fn clamp_scroll(cursor: usize, scroll: usize, height: usize, total: usize) -> us
     let height = height.max(1);
     let max_scroll = total.saturating_sub(height);
     keep_visible(cursor, scroll.min(max_scroll), height).min(max_scroll)
+}
+
+/// `match` / `matches`, so status lines read like English.
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "es"
+    }
 }
 
 #[cfg(test)]

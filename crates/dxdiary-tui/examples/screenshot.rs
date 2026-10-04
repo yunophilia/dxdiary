@@ -129,6 +129,27 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // `DXDIARY_FIND=query` runs a search, so a shot can show the shading.
+    if let Ok(q) = std::env::var("DXDIARY_FIND") {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let press = |app: &mut dxdiary_tui::App, code| {
+            app.handle(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        };
+        press(&mut app, KeyCode::Char('/'));
+        for ch in q.chars() {
+            press(&mut app, KeyCode::Char(ch));
+        }
+        press(&mut app, KeyCode::Enter);
+        for _ in 0..std::env::var("DXDIARY_FIND_STEP")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0)
+        {
+            press(&mut app, KeyCode::Char('n'));
+        }
+        eprintln!("{}", app.status);
+    }
+
     let mut term = Terminal::new(TestBackend::new(w, h))?;
     term.draw(|f| app.render(f))?;
 

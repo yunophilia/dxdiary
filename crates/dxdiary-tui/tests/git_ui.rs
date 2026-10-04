@@ -1196,3 +1196,327 @@ fn a_keyword_after_a_tab_indent_is_coloured_at_the_right_column() {
         "a tab-indented keyword must be coloured over its whole width"
     );
 }
+
+// ------------------------------------------------------------------ search
+
+/// An app on a file whose lines are easy to assert about.
+fn find_app(tag: &str, body: &str) -> App {
+    let root = std::env::temp_dir().join(format!("dxdiary-find-{tag}"));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    write(&root, "code.rs", body);
+    let mut app = App::new(root.clone(), Config::default(), ColorDepth::TrueColor);
+    app.reveal_and_open(root.join("code.rs"));
+    app
+}
+
+/// Type a search and commit it.
+fn search_for(app: &mut App, query: &str) {
+    key(app, KeyCode::Char('/'));
+    typed(app, query);
+    key(app, KeyCode::Enter);
+}
+
+const HAYSTACK: &str = "fn alpha() {}\nfn beta() {}\nfn alpha_two() {}\nfn gamma() {}\n";
+
+#[test]
+fn slash_opens_a_prompt_that_shows_what_is_typed() {
+    let mut app = find_app("prompt", HAYSTACK);
+    assert_eq!(app.prompt_line(), None, "no prompt until asked for");
+
+    key(&mut app, KeyCode::Char('/'));
+    assert_eq!(app.mode, dxdiary_tui::Mode::Prompt);
+    typed(&mut app, "alp");
+    assert_eq!(app.prompt_line().unwrap(), "/alp\u{2588}");
+
+    // The prompt owns the status line while it is open.
+    assert!(draw(&mut app).contains("/alp"));
+}
+
+#[test]
+fn a_committed_search_moves_the_cursor_and_counts_the_matches() {
+    let mut app = find_app("count", HAYSTACK);
+    search_for(&mut app, "alpha");
+
+    assert_eq!(app.mode, dxdiary_tui::Mode::Normal, "the prompt closed");
+    assert_eq!(app.search.as_ref().unwrap().len(), 2);
+    assert_eq!(app.doc_line, 0, "cursor on the first match");
+    assert!(app.status.contains("2 matches"), "{}", app.status);
+}
+
+#[test]
+fn one_match_is_reported_in_the_singular() {
+    let mut app = find_app("singular", HAYSTACK);
+    search_for(&mut app, "beta");
+    assert!(
+        app.status.contains("1 match for") && !app.status.contains("matches"),
+        "{}",
+        app.status
+    );
+}
+
+#[test]
+fn n_steps_forward_and_wraps_with_a_word_about_it() {
+    let mut app = find_app("step", HAYSTACK);
+    search_for(&mut app, "alpha");
+    assert_eq!(app.doc_line, 0);
+
+    key(&mut app, KeyCode::Char('n'));
+    assert_eq!(app.doc_line, 2);
+    assert!(app.status.contains("2/2"), "{}", app.status);
+
+    key(&mut app, KeyCode::Char('n'));
+    assert_eq!(app.doc_line, 0, "wrapped to the first");
+    assert!(app.status.contains("wrapped"), "{}", app.status);
+}
+
+#[test]
+fn shift_n_steps_backward() {
+    let mut app = find_app("back", HAYSTACK);
+    search_for(&mut app, "alpha");
+    key(&mut app, KeyCode::Char('N'));
+    assert_eq!(app.doc_line, 2, "backward from the first wraps to the last");
+}
+
+#[test]
+fn stepping_without_a_search_says_what_to_press() {
+    let mut app = find_app("nostep", HAYSTACK);
+    key(&mut app, KeyCode::Char('n'));
+    assert!(app.status.contains('/'), "{}", app.status);
+    assert!(app.search.is_none());
+}
+
+#[test]
+fn a_query_with_no_match_says_so_and_leaves_nothing_highlighted() {
+    let mut app = find_app("miss", HAYSTACK);
+    search_for(&mut app, "zzz");
+    assert!(app.search.is_none(), "no stale highlight");
+    assert!(app.status.contains("no match"), "{}", app.status);
+}
+
+#[test]
+fn the_search_previews_while_typing() {
+    // Live, not modal: the point is to see where you are going before
+    // committing to it.
+    let mut app = find_app("live", HAYSTACK);
+    key(&mut app, KeyCode::Char('/'));
+    typed(&mut app, "gamma");
+    assert_eq!(app.doc_line, 3, "moved before Enter was pressed");
+    assert_eq!(app.search.as_ref().unwrap().len(), 1);
+}
+
+#[test]
+fn cancelling_a_search_puts_the_cursor_back() {
+    let mut app = find_app("cancel", HAYSTACK);
+    key(&mut app, KeyCode::Tab);
+    key(&mut app, KeyCode::Down);
+    let before = app.doc_line;
+    assert_eq!(before, 1);
+
+    key(&mut app, KeyCode::Char('/'));
+    typed(&mut app, "gamma");
+    assert_eq!(app.doc_line, 3, "previewed away from where we were");
+
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.mode, dxdiary_tui::Mode::Normal);
+    assert_eq!(app.doc_line, before, "esc restored the cursor");
+    assert!(app.search.is_none());
+    assert!(!app.quit, "esc in a prompt must not quit");
+}
+
+#[test]
+fn backspace_narrows_the_query_back_down() {
+    let mut app = find_app("backspace", HAYSTACK);
+    key(&mut app, KeyCode::Char('/'));
+    typed(&mut app, "alphax");
+    assert!(app.search.is_none(), "no match for the longer query");
+
+    key(&mut app, KeyCode::Backspace);
+    assert_eq!(app.prompt_line().unwrap(), "/alpha\u{2588}");
+    assert_eq!(app.search.as_ref().unwrap().len(), 2);
+}
+
+#[test]
+fn a_search_starts_from_the_cursor_not_the_top_of_the_file() {
+    let mut app = find_app("from-cursor", HAYSTACK);
+    key(&mut app, KeyCode::Tab);
+    for _ in 0..2 {
+        key(&mut app, KeyCode::Down);
+    }
+    assert_eq!(app.doc_line, 2);
+
+    key(&mut app, KeyCode::Char('/'));
+    typed(&mut app, "alpha");
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.doc_line, 2,
+        "selected the match at the cursor, not line 0"
+    );
+}
+
+#[test]
+fn esc_clears_a_search_before_it_quits() {
+    let mut app = find_app("esc-clears", HAYSTACK);
+    search_for(&mut app, "alpha");
+
+    key(&mut app, KeyCode::Esc);
+    assert!(app.search.is_none(), "the highlight went");
+    assert!(!app.quit, "and the session did not");
+
+    key(&mut app, KeyCode::Esc);
+    assert!(app.quit, "with nothing to dismiss, esc still quits");
+}
+
+#[test]
+fn q_quits_even_with_a_search_on_screen() {
+    let mut app = find_app("q-quits", HAYSTACK);
+    search_for(&mut app, "alpha");
+    key(&mut app, KeyCode::Char('q'));
+    assert!(app.quit, "q is unconditional; only esc dismisses first");
+}
+
+#[test]
+fn matches_are_shaded_and_the_selected_one_differently() {
+    let mut app = find_app("shade", HAYSTACK);
+    search_for(&mut app, "alpha");
+
+    let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    let buf = term.backend().buffer();
+
+    let mut on_first = Vec::new();
+    let mut on_second = Vec::new();
+    for y in 0..buf.area.height {
+        let text: String = (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol())
+            .collect::<Vec<_>>()
+            .join("");
+        // `alpha` appears on the row for line 1 and the row for line 3.
+        if let Some(byte) = text.find("alpha") {
+            let col = text[..byte].chars().count();
+            let bgs: Vec<_> = (0..5).map(|i| buf[((col + i) as u16, y)].bg).collect();
+            if on_first.is_empty() {
+                on_first = bgs;
+            } else if on_second.is_empty() {
+                on_second = bgs;
+            }
+        }
+    }
+
+    assert_eq!(on_first.len(), 5, "found the first match row");
+    assert_eq!(on_second.len(), 5, "found the second match row");
+    assert!(
+        on_first.iter().all(|c| *c == on_first[0]),
+        "the whole match is shaded, not part of it: {on_first:?}"
+    );
+    assert_ne!(
+        on_first[0], on_second[0],
+        "the selected match is distinguishable from the others"
+    );
+}
+
+#[test]
+fn a_match_after_a_tab_is_shaded_at_the_right_columns() {
+    // The same raw-versus-expanded trap as syntax colouring: both now map
+    // through one column table.
+    let mut app = find_app("shade-tab", "fn f() {\n\talpha\n}\n");
+    search_for(&mut app, "alpha");
+
+    let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    let buf = term.backend().buffer();
+
+    for y in 0..buf.area.height {
+        let text: String = (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol())
+            .collect::<Vec<_>>()
+            .join("");
+        if let Some(byte) = text.find("alpha") {
+            let col = text[..byte].chars().count();
+            let bgs: Vec<_> = (0..5).map(|i| buf[((col + i) as u16, y)].bg).collect();
+            assert!(
+                bgs.iter().all(|c| *c == bgs[0]),
+                "shading drifted across the tab: {bgs:?}"
+            );
+            // And the column before the match is not shaded.
+            assert_ne!(buf[((col - 1) as u16, y)].bg, bgs[0], "shading ran wide");
+            return;
+        }
+    }
+    panic!("no row containing the match");
+}
+
+#[test]
+fn searching_from_the_diff_view_switches_to_the_file() {
+    let mut app = diff_app("find-in-diff");
+    assert_eq!(
+        app.view,
+        dxdiary_tui::ContentView::Diff,
+        "the fixture opens changed"
+    );
+
+    search_for(&mut app, "fn");
+    assert_eq!(
+        app.view,
+        dxdiary_tui::ContentView::File,
+        "matches are file lines, so the file is what gets shown"
+    );
+}
+
+// -------------------------------------------------------------- goto line
+
+#[test]
+fn colon_jumps_to_a_line_number() {
+    let mut app = find_app("goto", HAYSTACK);
+    key(&mut app, KeyCode::Char(':'));
+    typed(&mut app, "3");
+    assert_eq!(app.prompt_line().unwrap(), ":3\u{2588}");
+    key(&mut app, KeyCode::Enter);
+
+    assert_eq!(app.doc_line, 2, "line numbers are 1-based on screen");
+    assert!(app.status.contains("line 3"), "{}", app.status);
+}
+
+#[test]
+fn a_line_past_the_end_lands_on_the_last_one_and_says_so() {
+    let mut app = find_app("goto-past", HAYSTACK);
+    key(&mut app, KeyCode::Char(':'));
+    typed(&mut app, "900");
+    key(&mut app, KeyCode::Enter);
+
+    assert_eq!(app.doc_line, app.text_line_count() - 1);
+    assert!(app.status.contains("past the end"), "{}", app.status);
+}
+
+#[test]
+fn a_goto_that_is_not_a_number_is_refused_without_moving() {
+    let mut app = find_app("goto-junk", HAYSTACK);
+    key(&mut app, KeyCode::Char(':'));
+    typed(&mut app, "abc");
+    key(&mut app, KeyCode::Enter);
+
+    assert_eq!(app.doc_line, 0, "stayed put");
+    assert!(app.status.contains("not a line number"), "{}", app.status);
+}
+
+#[test]
+fn line_zero_is_not_a_line() {
+    let mut app = find_app("goto-zero", HAYSTACK);
+    key(&mut app, KeyCode::Char(':'));
+    typed(&mut app, "0");
+    key(&mut app, KeyCode::Enter);
+    assert!(app.status.contains("not a line number"), "{}", app.status);
+}
+
+#[test]
+fn typing_a_command_letter_into_a_prompt_is_just_text() {
+    // `q`, `d` and `b` are commands in normal mode. Inside a prompt they
+    // must not fire, or no query containing them could ever be typed.
+    let mut app = find_app("prompt-letters", "fn quit_db() {}\n");
+    key(&mut app, KeyCode::Char('/'));
+    typed(&mut app, "quit_db");
+    assert!(!app.quit, "q did not quit");
+    assert_eq!(app.prompt_line().unwrap(), "/quit_db\u{2588}");
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.search.as_ref().unwrap().len(), 1);
+}
