@@ -1520,3 +1520,296 @@ fn typing_a_command_letter_into_a_prompt_is_just_text() {
     key(&mut app, KeyCode::Enter);
     assert_eq!(app.search.as_ref().unwrap().len(), 1);
 }
+
+// ------------------------------------------------------- go to definition
+
+/// Poll until an outstanding LSP reply has been acted on, or give up.
+fn settle(app: &mut App) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        app.poll_lsp();
+        if app.status.starts_with("definition ·") || app.status.contains("failed") {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn ctrl_bracket_jumps_to_a_definition_in_another_file() {
+    let Some(mut app) = lsp_app("goto-def", "fn main() {\n    helper();\n}\n") else {
+        eprintln!("skipped: python not available");
+        return;
+    };
+    // The mock answers every definition request with defined.rs:3.
+    write(
+        &app.tree.root.clone(),
+        "defined.rs",
+        "a\nb\nfn helper() {}\n",
+    );
+    app.tree.refresh();
+
+    key(&mut app, KeyCode::Tab);
+    key(&mut app, KeyCode::Down);
+    assert_eq!(app.doc_line, 1, "on the call site");
+
+    ctrl(&mut app, ']');
+    settle(&mut app);
+
+    assert_eq!(name_of(&app), "defined.rs", "{}", app.status);
+    assert_eq!(app.doc_line, 2, "the line the server named, 0-based");
+}
+
+#[test]
+fn ctrl_o_comes_back_from_a_jump() {
+    let Some(mut app) = lsp_app("goto-back", "fn main() {\n    helper();\n}\n") else {
+        eprintln!("skipped: python not available");
+        return;
+    };
+    write(
+        &app.tree.root.clone(),
+        "defined.rs",
+        "a\nb\nfn helper() {}\n",
+    );
+    app.tree.refresh();
+
+    key(&mut app, KeyCode::Tab);
+    key(&mut app, KeyCode::Down);
+    ctrl(&mut app, ']');
+    settle(&mut app);
+    assert_eq!(name_of(&app), "defined.rs");
+
+    ctrl(&mut app, 'o');
+    assert_eq!(name_of(&app), "code.rs", "{}", app.status);
+    assert_eq!(app.doc_line, 1, "back on the call site, not the top");
+}
+
+#[test]
+fn going_back_with_nowhere_to_go_says_so() {
+    let Some(mut app) = lsp_app("goto-nowhere", "fn main() {}\n") else {
+        eprintln!("skipped: python not available");
+        return;
+    };
+    ctrl(&mut app, 'o');
+    assert!(app.status.contains("no jump"), "{}", app.status);
+}
+
+#[test]
+fn a_definition_in_a_file_that_is_not_there_is_reported() {
+    // The mock names defined.rs; this fixture never creates it.
+    let Some(mut app) = lsp_app("goto-missing", "fn main() {\n    helper();\n}\n") else {
+        eprintln!("skipped: python not available");
+        return;
+    };
+    ctrl(&mut app, ']');
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline && !app.status.contains("not on disk") {
+        app.poll_lsp();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(app.status.contains("not on disk"), "{}", app.status);
+    assert_eq!(name_of(&app), "code.rs", "stayed put");
+}
+
+#[test]
+fn asking_for_a_definition_on_a_file_with_no_language_says_so() {
+    // Deliberately not a .rs file: whether any real language server is
+    // installed varies by machine, but "no language" is decided by the
+    // extension alone, so this asserts something true everywhere.
+    let root = std::env::temp_dir().join("dxdiary-find-no-lang");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    write(&root, "notes.txt", "some prose\n");
+    let mut app = App::new(root.clone(), Config::default(), ColorDepth::TrueColor);
+    app.reveal_and_open(root.join("notes.txt"));
+
+    ctrl(&mut app, ']');
+    assert!(app.status.contains("no language"), "{}", app.status);
+}
+
+#[test]
+fn a_jump_is_refused_rather_than_losing_unsaved_edits() {
+    let Some(mut app) = lsp_app("goto-dirty", "fn main() {\n    helper();\n}\n") else {
+        eprintln!("skipped: python not available");
+        return;
+    };
+    write(
+        &app.tree.root.clone(),
+        "defined.rs",
+        "a\nb\nfn helper() {}\n",
+    );
+    app.tree.refresh();
+
+    key(&mut app, KeyCode::Char('i'));
+    typed(&mut app, "x");
+    key(&mut app, KeyCode::Esc);
+    assert!(app.is_dirty());
+
+    ctrl(&mut app, ']');
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline && !app.status.contains("unsaved") {
+        app.poll_lsp();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(name_of(&app), "code.rs", "{}", app.status);
+    assert!(app.is_dirty(), "the edit survived");
+
+    // And nothing was pushed onto the jump list for a jump that never
+    // happened, so ctrl-o has nowhere to go.
+    ctrl(&mut app, 'o');
+    assert!(app.status.contains("no jump"), "{}", app.status);
+}
+
+#[test]
+fn hover_asks_about_the_column_the_cursor_is_on() {
+    // The mock echoes the position back, which is the only way to see from
+    // outside that the request carried the cursor and not column zero.
+    let Some(mut app) = lsp_app("hover-col", "fn main() {\n    helper();\n}\n") else {
+        eprintln!("skipped: python not available");
+        return;
+    };
+    key(&mut app, KeyCode::Tab);
+    key(&mut app, KeyCode::Down);
+    for _ in 0..6 {
+        key(&mut app, KeyCode::Right);
+    }
+    key(&mut app, KeyCode::Char('K'));
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline && !app.status.starts_with("hover at") {
+        app.poll_lsp();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(app.status, "hover at 1:6", "{}", app.status);
+}
+
+// --------------------------------------------------------- the caret column
+
+/// Row index and columns of the reversed cell, if there is exactly one.
+fn caret_cell(app: &mut App) -> Option<(u16, u16)> {
+    let mut term = Terminal::new(TestBackend::new(90, 16)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    let buf = term.backend().buffer();
+    let mut found = Vec::new();
+    for y in 0..buf.area.height {
+        for x in 0..buf.area.width {
+            if buf[(x, y)]
+                .modifier
+                .contains(ratatui::style::Modifier::REVERSED)
+            {
+                found.push((y, x));
+            }
+        }
+    }
+    assert!(found.len() <= 1, "more than one caret on screen: {found:?}");
+    found.first().copied()
+}
+
+#[test]
+fn l_and_h_move_the_cursor_along_the_line() {
+    let mut app = find_app("columns", "abcdef\n");
+    key(&mut app, KeyCode::Tab);
+
+    let start = caret_cell(&mut app).expect("a caret on the focused pane");
+    for _ in 0..3 {
+        key(&mut app, KeyCode::Char('l'));
+    }
+    let moved = caret_cell(&mut app).expect("caret still shown");
+    assert_eq!(moved.0, start.0, "same row");
+    assert_eq!(moved.1, start.1 + 3, "three columns right");
+
+    key(&mut app, KeyCode::Char('h'));
+    assert_eq!(caret_cell(&mut app).unwrap().1, start.1 + 2);
+}
+
+#[test]
+fn the_cursor_stops_at_the_end_of_the_line() {
+    let mut app = find_app("clamp-col", "ab\n");
+    key(&mut app, KeyCode::Tab);
+    for _ in 0..10 {
+        key(&mut app, KeyCode::Char('l'));
+    }
+    // Two characters, so the furthest the cursor goes is just past the last.
+    assert_eq!(app.cursor_display_column(), 2);
+}
+
+#[test]
+fn there_is_no_caret_while_the_tree_has_focus() {
+    // Two carets would be a lie about where typing goes.
+    let mut app = find_app("no-caret", "abc\n");
+    assert_eq!(caret_cell(&mut app), None, "focus starts on the tree");
+    key(&mut app, KeyCode::Tab);
+    assert!(caret_cell(&mut app).is_some());
+}
+
+#[test]
+fn the_caret_lands_past_a_tab_at_its_expanded_column() {
+    let mut app = find_app("caret-tab", "\tx\n");
+    key(&mut app, KeyCode::Tab);
+    assert_eq!(app.cursor_display_column(), 0, "on the tab itself");
+    key(&mut app, KeyCode::Char('l'));
+    assert_eq!(
+        app.cursor_display_column(),
+        4,
+        "one character right is four columns right, across a tab"
+    );
+}
+
+#[test]
+fn the_view_follows_the_cursor_off_the_right_edge() {
+    let long = format!("{}needle\n", "x".repeat(300));
+    let mut app = find_app("follow", &long);
+    key(&mut app, KeyCode::Tab);
+    // Draw once so the pane width is known.
+    let _ = draw(&mut app);
+    assert_eq!(app.doc_scroll_x, 0);
+
+    // Past the end of the word, not onto its first character: the cursor
+    // sits at the right edge of the viewport, so only its own column is
+    // guaranteed on screen.
+    for _ in 0..306 {
+        key(&mut app, KeyCode::Char('l'));
+    }
+    assert!(
+        app.doc_scroll_x > 0,
+        "the viewport never followed the cursor"
+    );
+    assert!(
+        draw(&mut app).contains("needle"),
+        "the cursor scrolled somewhere the text is not"
+    );
+}
+
+#[test]
+fn shift_arrow_pans_without_moving_the_cursor() {
+    let long = format!("{}\n", "x".repeat(300));
+    let mut app = find_app("pan", &long);
+    key(&mut app, KeyCode::Tab);
+    let _ = draw(&mut app);
+
+    let before = app.cursor_display_column();
+    app.handle(Event::Key(KeyEvent {
+        code: KeyCode::Right,
+        modifiers: KeyModifiers::SHIFT,
+        kind: KeyEventKind::Press,
+        state: crossterm::event::KeyEventState::NONE,
+    }));
+    assert_eq!(app.doc_scroll_x, 8, "panned a jump");
+    assert_eq!(app.cursor_display_column(), before, "cursor stayed put");
+}
+
+#[test]
+fn moving_down_keeps_the_column_for_the_servers_benefit() {
+    // hover and go-to-definition ask about the buffer cursor, so it has to
+    // follow the line the eye is on rather than lagging on the old one.
+    let mut app = find_app("sync", "abcdef\nabcdef\n");
+    key(&mut app, KeyCode::Tab);
+    for _ in 0..3 {
+        key(&mut app, KeyCode::Char('l'));
+    }
+    key(&mut app, KeyCode::Down);
+    assert_eq!(app.doc_line, 1);
+    let buf = app.buffer.as_ref().unwrap();
+    assert_eq!(buf.cursor.line, 1, "the buffer cursor came along");
+    assert_eq!(buf.cursor.column, 3);
+}

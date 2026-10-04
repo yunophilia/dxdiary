@@ -186,7 +186,9 @@ fn definition_returns_a_location() {
 
     match event {
         Event::Response { result, .. } => {
-            assert!(result["uri"].as_str().unwrap().ends_with("a.rs"));
+            let uri = result["uri"].as_str().unwrap();
+            assert!(uri.ends_with("defined.rs"), "{uri}");
+            assert_eq!(result["range"]["start"]["line"], 2);
         }
         other => panic!("wrong event: {other:?}"),
     }

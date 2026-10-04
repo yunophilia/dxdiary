@@ -80,7 +80,7 @@ impl Palette {
 }
 
 /// Width of the blame gutter: `abcd1234 Author Name      3 days ago  `.
-const BLAME_WIDTH: usize = 34;
+pub(crate) const BLAME_WIDTH: usize = 34;
 
 /// One line's blame column.
 ///
@@ -151,6 +151,8 @@ struct LineStyle<'a> {
     /// Raw-character index to display column, from `render_line_mapped`.
     offsets: &'a [usize],
     marks: &'a Marks,
+    /// Display column of the caret, when it is on this line.
+    caret: Option<usize>,
     scroll_x: usize,
     width: usize,
     base: Style,
@@ -161,6 +163,7 @@ fn highlighted_spans(text: &str, s: &LineStyle, p: &Palette) -> Vec<Span<'static
         spans,
         offsets,
         marks,
+        caret,
         scroll_x,
         width,
         base,
@@ -205,9 +208,17 @@ fn highlighted_spans(text: &str, s: &LineStyle, p: &Palette) -> Vec<Span<'static
         }
     }
 
-    let style_of = |fg: Option<Color>, bg: Option<Color>| {
+    let style_of = |fg: Option<Color>, bg: Option<Color>, caret: bool| {
         let s = fg.map_or(base, |col| base.fg(col));
-        bg.map_or(s, |col| s.bg(col))
+        let s = bg.map_or(s, |col| s.bg(col));
+        // Reversed rather than a themed colour: the caret has to be obvious
+        // on top of whatever syntax and search have already done to the cell,
+        // and reversing is the one thing that always contrasts.
+        if caret {
+            s.add_modifier(Modifier::REVERSED)
+        } else {
+            s
+        }
     };
 
     let mut out: Vec<Span<'static>> = Vec::new();
@@ -215,14 +226,15 @@ fn highlighted_spans(text: &str, s: &LineStyle, p: &Palette) -> Vec<Span<'static
     let mut run_style = (
         colors.get(scroll_x).copied().flatten(),
         backs.get(scroll_x).copied().flatten(),
+        caret == Some(scroll_x),
     );
 
     for i in scroll_x..end {
-        let c = (colors[i], backs[i]);
+        let c = (colors[i], backs[i], caret == Some(i));
         if c != run_style && !run.is_empty() {
             out.push(Span::styled(
                 std::mem::take(&mut run),
-                style_of(run_style.0, run_style.1),
+                style_of(run_style.0, run_style.1, run_style.2),
             ));
             run_style = c;
         } else if run.is_empty() {
@@ -231,7 +243,10 @@ fn highlighted_spans(text: &str, s: &LineStyle, p: &Palette) -> Vec<Span<'static
         run.push(chars[i]);
     }
     if !run.is_empty() {
-        out.push(Span::styled(run, style_of(run_style.0, run_style.1)));
+        out.push(Span::styled(
+            run,
+            style_of(run_style.0, run_style.1, run_style.2),
+        ));
     }
     out
 }
@@ -338,6 +353,7 @@ fn diff_lines<'a>(
                         offsets: &offsets,
                         // Search works on the file view, which it switches to.
                         marks: &[],
+                        caret: None,
                         scroll_x: app.doc_scroll_x,
                         width: text_width,
                         base: style,
@@ -572,8 +588,9 @@ pub(crate) fn render_content(f: &mut Frame, area: Rect, app: &App, hits: &mut Hi
             } else {
                 0
             };
-            // +1 for the line number's trailing space, +1 for the severity column.
-            let text_width = (inner.width as usize).saturating_sub(gutter + 2 + blame_w);
+            // One formula, in App, because the horizontal scroll is clamped
+            // against it on a keystroke before any frame exists.
+            let text_width = app.content_text_width();
 
             lines
                 .iter()
@@ -622,6 +639,11 @@ pub(crate) fn render_content(f: &mut Frame, area: Rect, app: &App, hits: &mut Hi
                             spans: app.doc_spans.get(n).unwrap_or(&empty),
                             offsets: &offsets,
                             marks: &marks,
+                            // Only on the line the cursor is on, and only
+                            // while this pane has focus -- two carets on
+                            // screen would be a lie about where typing goes.
+                            caret: (current && app.focus == PaneId::Content)
+                                .then(|| app.cursor_display_column()),
                             scroll_x: app.doc_scroll_x,
                             width: text_width,
                             base,

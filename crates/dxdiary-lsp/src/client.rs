@@ -355,6 +355,45 @@ pub fn path_to_uri(path: &std::path::Path) -> String {
     out
 }
 
+/// Turn a `file://` URI from a server back into a path.
+///
+/// The inverse of [`path_to_uri`]. Servers answer `definition` with URIs they
+/// built themselves, so this has to cope with any percent-encoding and not
+/// only the set `path_to_uri` emits. Returns `None` for a non-`file` scheme --
+/// a server may name a location inside a jar or a generated buffer, and there
+/// is nothing on disk to open.
+pub fn uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
+    let rest = uri.strip_prefix("file://")?;
+    // An authority is allowed but always empty for local files, so anything
+    // before the first `/` is dropped rather than guessed at.
+    let path = match rest.find('/') {
+        Some(0) => rest,
+        Some(i) => &rest[i..],
+        None => return None,
+    };
+
+    let bytes = path.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
+            // A stray `%` falls through and is kept, rather than failing the
+            // whole URI.
+            if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+
+    let decoded = String::from_utf8(out).ok()?;
+    Some(std::path::PathBuf::from(decoded))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,6 +495,57 @@ mod tests {
         assert_eq!(
             path_to_uri(Path::new(r"C:\code\a.rs")),
             "file://C:/code/a.rs"
+        );
+    }
+
+    #[test]
+    fn a_uri_round_trips_back_to_its_path() {
+        for path in [
+            "/tmp/a.rs",
+            "/tmp/with space/b.rs",
+            "/tmp/\u{3b1}\u{3b2}/c.rs",
+            "/tmp/a+b/d.rs",
+            "/tmp/100%/e.rs",
+        ] {
+            let uri = path_to_uri(Path::new(path));
+            assert_eq!(
+                uri_to_path(&uri).unwrap(),
+                Path::new(path),
+                "round trip failed for {path} via {uri}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_encoding_we_do_not_emit_is_still_decoded() {
+        // Servers build their own URIs and encode more than we do.
+        assert_eq!(
+            uri_to_path("file:///tmp/a%2Fb/c%2Ers").unwrap(),
+            Path::new("/tmp/a/b/c.rs")
+        );
+    }
+
+    #[test]
+    fn an_empty_authority_is_dropped() {
+        assert_eq!(
+            uri_to_path("file:///tmp/a.rs").unwrap(),
+            Path::new("/tmp/a.rs")
+        );
+    }
+
+    #[test]
+    fn a_scheme_with_nothing_on_disk_is_refused() {
+        // A server may name a location inside an archive or a virtual buffer.
+        assert_eq!(uri_to_path("jar:file:///x.jar!/A.java"), None);
+        assert_eq!(uri_to_path("untitled:Untitled-1"), None);
+    }
+
+    #[test]
+    fn a_truncated_escape_does_not_lose_the_rest_of_the_path() {
+        assert_eq!(
+            uri_to_path("file:///tmp/a%").unwrap(),
+            Path::new("/tmp/a%"),
+            "a stray percent is kept rather than failing the URI"
         );
     }
 }

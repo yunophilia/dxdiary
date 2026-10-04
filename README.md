@@ -35,7 +35,8 @@ cargo run -- /path/to/repo
 | | |
 |---|---|
 | `↑`/`↓` or `j`/`k` | move |
-| `←`/`→` or `h`/`l` | collapse/expand, or scroll content sideways |
+| `←`/`→` or `h`/`l` | collapse/expand in the tree, or move the cursor along the line |
+| `shift`+`←`/`→` | pan a long line without walking the cursor along it |
 | `enter` / `space` | open file, or fold directory |
 | click | same — fold a directory, open a file |
 | scroll wheel | scrolls whatever is under the pointer |
@@ -90,10 +91,16 @@ Language servers:
 | | |
 |---|---|
 | `K` | hover information at the cursor |
+| `ctrl-]` | go to definition — follows into another file |
+| `ctrl-o` | come back from a jump |
 | gutter | `✗` error, `!` warning, `i` info |
 
 Diagnostics are live: the server sees each edit after a short pause and again on
 save, so markers follow what you type rather than what is on disk.
+
+`K` and `ctrl-]` ask about the column the cursor is on, which is the reversed cell on
+the current line. A jump into another file reveals it in the tree, and `ctrl-o` walks
+back through where you have been.
 
 ```bash
 cargo run -- --doctor

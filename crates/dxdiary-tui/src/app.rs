@@ -135,6 +135,13 @@ pub struct App {
     pub lsp_note: Option<String>,
     /// Request id of an outstanding hover, so its reply can be recognised.
     hover_id: Option<i64>,
+    /// Request id of an outstanding go-to-definition.
+    definition_id: Option<i64>,
+    /// Where we were before each jump, newest last.
+    ///
+    /// A definition can land in another file, and without a way back the
+    /// jump is a one-way trip through someone else's crate.
+    jumps: Vec<(PathBuf, usize)>,
     /// When the buffer last changed without the server being told, in the
     /// `now_ms` clock. `None` when the server is up to date.
     lsp_change_at: Option<u64>,
@@ -211,6 +218,8 @@ impl App {
             diagnostics: Vec::new(),
             lsp_note: None,
             hover_id: None,
+            definition_id: None,
+            jumps: Vec::new(),
             lsp_change_at: None,
             discard_armed: None,
             search: None,
@@ -547,6 +556,9 @@ impl App {
             return match k.code {
                 KeyCode::Char('s') => self.save(),
                 KeyCode::Char('r') => self.redo(),
+                // Ctrl+] and Ctrl+o, as every ctags-aware editor binds them.
+                KeyCode::Char(']') => self.request_definition(),
+                KeyCode::Char('o') => self.jump_back(),
                 _ => false,
             };
         }
@@ -605,20 +617,23 @@ impl App {
             KeyCode::Home | KeyCode::Char('g') => self.move_to(0),
             KeyCode::End | KeyCode::Char('G') => self.move_to(usize::MAX),
             KeyCode::Enter | KeyCode::Char(' ') => self.activate(),
+            // Shift pans the viewport in jumps, for reading a long line
+            // without walking the cursor along it.
+            KeyCode::Right if k.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.doc_scroll_x = self.doc_scroll_x.saturating_add(8);
+                true
+            }
+            KeyCode::Left if k.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.doc_scroll_x = self.doc_scroll_x.saturating_sub(8);
+                true
+            }
             KeyCode::Right | KeyCode::Char('l') => match self.focus {
                 PaneId::Tree => self.expand_selected(),
-                PaneId::Content => {
-                    self.doc_scroll_x = self.doc_scroll_x.saturating_add(8);
-                    self.clamp_content();
-                    true
-                }
+                PaneId::Content => self.move_column(1),
             },
             KeyCode::Left | KeyCode::Char('h') => match self.focus {
                 PaneId::Tree => self.collapse_selected(),
-                PaneId::Content => {
-                    self.doc_scroll_x = self.doc_scroll_x.saturating_sub(8);
-                    true
-                }
+                PaneId::Content => self.move_column(-1),
             },
             _ => false,
         }
@@ -662,6 +677,13 @@ impl App {
                     return false;
                 }
                 self.doc_line = next;
+                // The buffer cursor is what hover and go-to-definition ask
+                // about, so it has to follow the line the eye is on. Its own
+                // move_to preserves the goal column across short lines.
+                if let Some(buf) = &mut self.buffer {
+                    let column = buf.cursor.column;
+                    buf.move_to(next, column);
+                }
                 self.clamp_content();
             }
         }
@@ -1094,6 +1116,7 @@ impl App {
         let mut dirty = false;
         let mut incoming: Option<Vec<lsp_types::Diagnostic>> = None;
         let mut hover: Option<String> = None;
+        let mut jump: Option<Result<(PathBuf, usize), String>> = None;
 
         while let Ok(event) = client.events.try_recv() {
             match event {
@@ -1107,6 +1130,18 @@ impl App {
                 dxdiary_lsp::Event::Response { id, result } if Some(id) == self.hover_id => {
                     self.hover_id = None;
                     hover = hover_text(&result);
+                    dirty = true;
+                }
+                dxdiary_lsp::Event::Response { id, result } if Some(id) == self.definition_id => {
+                    self.definition_id = None;
+                    jump = Some(
+                        definition_target(&result).ok_or_else(|| "no definition found".to_string()),
+                    );
+                    dirty = true;
+                }
+                dxdiary_lsp::Event::Error { id, message } if Some(id) == self.definition_id => {
+                    self.definition_id = None;
+                    jump = Some(Err(format!("definition failed: {message}")));
                     dirty = true;
                 }
                 dxdiary_lsp::Event::Error { id, message } if Some(id) == self.hover_id => {
@@ -1139,6 +1174,12 @@ impl App {
 
         if let Some(text) = hover {
             self.status = text;
+        }
+
+        match jump {
+            Some(Ok((path, line))) => self.goto_location(path, line),
+            Some(Err(why)) => self.status = why,
+            None => {}
         }
         dirty
     }
@@ -1173,13 +1214,188 @@ impl App {
             self.status = "no language server for this file (dxdiary --doctor)".into();
             return true;
         };
-        match client.hover(&path, self.doc_line as u32, 0) {
+        let column = self.cursor_column() as u32;
+        match client.hover(&path, self.doc_line as u32, column) {
             Ok(id) => {
                 self.hover_id = Some(id);
                 self.status = "hover…".into();
             }
             Err(e) => self.status = format!("hover failed: {e}"),
         }
+        true
+    }
+
+    /// Move the cursor along the line (`h`/`l`), the viewport following.
+    ///
+    /// Before this the arrows panned the viewport, which was fine for a
+    /// read-only viewer but left no way to put the cursor on a column -- so
+    /// hover and go-to-definition could only ever ask about column zero.
+    fn move_column(&mut self, delta: isize) -> bool {
+        let line = self.doc_line;
+        let Some(buf) = &mut self.buffer else {
+            // No buffer to put a cursor in: fall back to panning, which is
+            // all a binary or too-large file can do anyway.
+            self.doc_scroll_x = if delta < 0 {
+                self.doc_scroll_x.saturating_sub(8)
+            } else {
+                self.doc_scroll_x.saturating_add(8)
+            };
+            return true;
+        };
+        let len = buf
+            .lines()
+            .get(line)
+            .map(|l| l.chars().count())
+            .unwrap_or(0);
+        let current = buf.cursor.column.min(len);
+        let next = if delta < 0 {
+            current.saturating_sub(delta.unsigned_abs())
+        } else {
+            (current + delta as usize).min(len)
+        };
+        if next == current && buf.cursor.column == current {
+            return false;
+        }
+        buf.move_to(line, next);
+        self.clamp_content();
+        true
+    }
+
+    /// Display column of the cursor, which is not its character offset once
+    /// the line contains a tab.
+    pub fn cursor_display_column(&self) -> usize {
+        let Some(buf) = &self.buffer else { return 0 };
+        let lines = buf.lines();
+        let Some(line) = lines.get(self.doc_line) else {
+            return 0;
+        };
+        let (_, offsets) = dxdiary_core::document::render_line_mapped(line, self.config.tab_width);
+        let raw = buf.cursor.column.min(offsets.len().saturating_sub(1));
+        offsets.get(raw).copied().unwrap_or(0)
+    }
+
+    /// Width left for text in the content pane once the gutters are taken.
+    ///
+    /// Shared with the renderer rather than computed twice: the horizontal
+    /// scroll is clamped against it on a keystroke, before any frame is
+    /// drawn, and the two have to agree or the cursor scrolls off screen.
+    pub fn content_text_width(&self) -> usize {
+        let gutter = self.text_line_count().max(1).to_string().len().max(3);
+        let blame = if self.show_blame && self.blame.is_some() {
+            crate::panes::BLAME_WIDTH
+        } else {
+            0
+        };
+        // +1 for the line number's trailing space, +1 for the severity column.
+        self.content_w.saturating_sub(gutter + 2 + blame)
+    }
+
+    /// Column the cursor is on, for a position-sensitive LSP request.
+    ///
+    /// Clamped to the line, because the goal column can sit past the end of a
+    /// short line and a server asked about a position that does not exist may
+    /// answer about nothing.
+    fn cursor_column(&self) -> usize {
+        let Some(buf) = &self.buffer else { return 0 };
+        let len = buf
+            .lines()
+            .get(self.doc_line)
+            .map(|l| l.chars().count())
+            .unwrap_or(0);
+        buf.cursor.column.min(len)
+    }
+
+    /// Ask where the symbol under the cursor is defined (`ctrl-]`).
+    fn request_definition(&mut self) -> bool {
+        let Some(lang) = self.language else {
+            self.status = "no language detected for this file".into();
+            return true;
+        };
+        let Some(doc) = &self.doc else { return false };
+        let path = doc.path().to_path_buf();
+        let column = self.cursor_column() as u32;
+
+        let Some(client) = self.lsp.get(&lang) else {
+            self.status = "no language server for this file (dxdiary --doctor)".into();
+            return true;
+        };
+        match client.definition(&path, self.doc_line as u32, column) {
+            Ok(id) => {
+                self.definition_id = Some(id);
+                self.status = "looking up definition…".into();
+            }
+            Err(e) => self.status = format!("definition failed: {e}"),
+        }
+        true
+    }
+
+    /// Go where a definition reply pointed.
+    fn goto_location(&mut self, target: PathBuf, line: usize) {
+        let here = self.doc.as_ref().map(|d| d.path().to_path_buf());
+
+        if Some(&target) == here.as_ref() {
+            // Same file: no reopen, which would discard the buffer and any
+            // unsaved edits along with it.
+            if let Some(from) = here {
+                self.jumps.push((from, self.doc_line));
+            }
+            self.doc_line = line.min(self.text_line_count().saturating_sub(1));
+            self.clamp_content();
+            self.status = format!("definition · line {}", self.doc_line + 1);
+            return;
+        }
+
+        if !target.exists() {
+            self.status = format!("definition is in {} — not on disk", target.display());
+            return;
+        }
+
+        let pending = here.map(|from| (from, self.doc_line));
+        self.reveal_and_open(target);
+        // Only record the jump if the open actually happened: an unsaved
+        // buffer refuses it, and a back-stack entry for a jump that did not
+        // occur would send you somewhere you never left.
+        let landed = self.doc.as_ref().map(|d| d.path().to_path_buf());
+        if let (Some(entry), Some(landed)) = (pending, landed) {
+            if landed != entry.0 {
+                self.jumps.push(entry);
+                self.doc_line = line.min(self.text_line_count().saturating_sub(1));
+                self.clamp_content();
+                self.status = format!(
+                    "definition · {}:{}",
+                    landed
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    self.doc_line + 1
+                );
+            }
+        }
+    }
+
+    /// Return to where the last jump started (`ctrl-o`).
+    fn jump_back(&mut self) -> bool {
+        let Some((path, line)) = self.jumps.pop() else {
+            self.status = "no jump to go back from".into();
+            return true;
+        };
+        let here = self.doc.as_ref().map(|d| d.path().to_path_buf());
+        if Some(&path) == here.as_ref() {
+            self.doc_line = line.min(self.text_line_count().saturating_sub(1));
+            self.clamp_content();
+        } else {
+            self.reveal_and_open(path.clone());
+            if self.doc.as_ref().map(|d| d.path()) == Some(path.as_path()) {
+                self.doc_line = line.min(self.text_line_count().saturating_sub(1));
+                self.clamp_content();
+            } else {
+                // The open was refused; put the entry back so the way home
+                // is not lost.
+                self.jumps.push((path, line));
+                return true;
+            }
+        }
+        self.status = format!("back · line {}", self.doc_line + 1);
         true
     }
 
@@ -1661,6 +1877,18 @@ impl App {
             self.content_h,
             self.content_rows(),
         );
+        // Horizontally there is no "end" to clamp against -- a line can be
+        // any length -- so this only follows the cursor.
+        //
+        // A zero width means no frame has been drawn yet and the real width
+        // is unknown. Following the cursor against it would scroll the line
+        // clean off screen; render clamps again once it knows, so skipping
+        // here costs nothing.
+        let width = self.content_text_width();
+        if self.buffer.is_some() && width > 0 {
+            self.doc_scroll_x =
+                keep_visible(self.cursor_display_column(), self.doc_scroll_x, width);
+        }
     }
 
     // -------------------------------------------------------------- render
@@ -1729,6 +1957,34 @@ fn hover_text(result: &serde_json::Value) -> Option<String> {
         .collect::<Vec<_>>()
         .join(" · ");
     (!flat.is_empty()).then_some(flat)
+}
+
+/// First location in a `textDocument/definition` reply.
+///
+/// The reply is allowed to be a single `Location`, an array of them, an array
+/// of `LocationLink`, or null -- servers among the five dxdiary ships specs for
+/// use at least three of those shapes. Only the first is used: a jump has to go
+/// somewhere, and picking from a list needs UI that does not exist yet.
+fn definition_target(result: &serde_json::Value) -> Option<(PathBuf, usize)> {
+    let one = if result.is_array() {
+        result.get(0)?
+    } else if result.is_object() {
+        result
+    } else {
+        // null, for "I do not know".
+        return None;
+    };
+
+    // `Location` has `uri` + `range`; `LocationLink` has `targetUri` +
+    // `targetSelectionRange`, falling back to `targetRange`.
+    let uri = one.get("uri").or_else(|| one.get("targetUri"))?.as_str()?;
+    let range = one
+        .get("range")
+        .or_else(|| one.get("targetSelectionRange"))
+        .or_else(|| one.get("targetRange"))?;
+    let line = range.get("start")?.get("line")?.as_u64()? as usize;
+
+    Some((dxdiary_lsp::uri_to_path(uri)?, line))
 }
 
 /// Milliseconds since process start, for undo coalescing.
@@ -2005,5 +2261,77 @@ mod tests {
         // 24 rows minus the status line minus two borders.
         assert_eq!(app.tree_h, 21);
         assert!(app.content_w > 40, "content pane got {}", app.content_w);
+    }
+
+    // --------------------------------------------- definition reply shapes
+
+    #[test]
+    fn a_bare_location_is_understood() {
+        let reply = serde_json::json!({
+            "uri": "file:///tmp/a.rs",
+            "range": {"start": {"line": 7, "character": 4},
+                      "end": {"line": 7, "character": 9}},
+        });
+        let (path, line) = definition_target(&reply).unwrap();
+        assert_eq!(path, std::path::Path::new("/tmp/a.rs"));
+        assert_eq!(line, 7);
+    }
+
+    #[test]
+    fn an_array_of_locations_takes_the_first() {
+        let reply = serde_json::json!([
+            {"uri": "file:///tmp/a.rs",
+             "range": {"start": {"line": 1, "character": 0},
+                       "end": {"line": 1, "character": 1}}},
+            {"uri": "file:///tmp/b.rs",
+             "range": {"start": {"line": 2, "character": 0},
+                       "end": {"line": 2, "character": 1}}},
+        ]);
+        let (path, line) = definition_target(&reply).unwrap();
+        assert_eq!(path, std::path::Path::new("/tmp/a.rs"));
+        assert_eq!(line, 1);
+    }
+
+    #[test]
+    fn a_location_link_uses_its_selection_range() {
+        // rust-analyzer answers with LocationLink, whose field names differ
+        // and which carries two ranges -- the selection one is the symbol.
+        let reply = serde_json::json!([{
+            "targetUri": "file:///tmp/a.rs",
+            "targetRange": {"start": {"line": 10, "character": 0},
+                            "end": {"line": 20, "character": 1}},
+            "targetSelectionRange": {"start": {"line": 11, "character": 7},
+                                     "end": {"line": 11, "character": 12}},
+        }]);
+        let (path, line) = definition_target(&reply).unwrap();
+        assert_eq!(path, std::path::Path::new("/tmp/a.rs"));
+        assert_eq!(line, 11, "the symbol, not the top of its whole body");
+    }
+
+    #[test]
+    fn a_location_link_without_a_selection_range_falls_back() {
+        let reply = serde_json::json!([{
+            "targetUri": "file:///tmp/a.rs",
+            "targetRange": {"start": {"line": 10, "character": 0},
+                            "end": {"line": 20, "character": 1}},
+        }]);
+        assert_eq!(definition_target(&reply).unwrap().1, 10);
+    }
+
+    #[test]
+    fn a_null_reply_is_no_definition_rather_than_a_panic() {
+        assert_eq!(definition_target(&serde_json::Value::Null), None);
+        assert_eq!(definition_target(&serde_json::json!([])), None);
+    }
+
+    #[test]
+    fn a_definition_outside_the_filesystem_is_refused() {
+        // A location inside a jar or a virtual document has no path to open.
+        let reply = serde_json::json!({
+            "uri": "jar:file:///x.jar!/A.class",
+            "range": {"start": {"line": 0, "character": 0},
+                      "end": {"line": 0, "character": 1}},
+        });
+        assert_eq!(definition_target(&reply), None);
     }
 }

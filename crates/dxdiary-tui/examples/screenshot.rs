@@ -150,6 +150,40 @@ fn main() -> anyhow::Result<()> {
         eprintln!("{}", app.status);
     }
 
+    // `DXDIARY_DEF=line:col` asks a real server where that symbol is
+    // defined, waits, and reports where it landed.
+    if let Ok(spec) = std::env::var("DXDIARY_DEF") {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let (line, col) = spec.split_once(':').unwrap_or((spec.as_str(), "0"));
+        let line: usize = line.parse().unwrap_or(1);
+        let col: usize = col.parse().unwrap_or(0);
+
+        let press = |app: &mut dxdiary_tui::App, code, m| {
+            app.handle(Event::Key(KeyEvent::new(code, m)));
+        };
+        press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        for _ in 1..line {
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        }
+        for _ in 0..col {
+            press(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        }
+        eprintln!("asking at {}:{}", line, app.cursor_display_column());
+
+        // Let the server index before asking, then ask and wait.
+        app.await_diagnostics(std::time::Duration::from_secs(90));
+        press(&mut app, KeyCode::Char(']'), KeyModifiers::CONTROL);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while std::time::Instant::now() < deadline {
+            app.poll_lsp();
+            if !app.status.starts_with("looking up") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        eprintln!("landed: {}", app.status);
+    }
+
     let mut term = Terminal::new(TestBackend::new(w, h))?;
     term.draw(|f| app.render(f))?;
 

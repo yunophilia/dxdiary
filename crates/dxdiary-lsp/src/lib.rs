@@ -15,6 +15,6 @@ pub mod filter;
 pub mod protocol;
 pub mod registry;
 
-pub use client::{path_to_uri, Client, Event};
+pub use client::{path_to_uri, uri_to_path, Client, Event};
 pub use filter::{filter, Filtered};
 pub use registry::{doctor, report, spec_for, ServerSpec, Status, SERVERS};

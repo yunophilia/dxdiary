@@ -566,6 +566,37 @@ own caret -- the terminal's cursor is parked out of the way in raw mode.
 clear the highlight, and losing the session to that reflex would be its own small
 disaster. `q` stays unconditional.
 
+### Phase 9 — a cursor you can aim — **done**
+
+`ctrl-]` goes to a definition and `ctrl-o` comes back, through a stack so a jump into
+someone else's crate is not a one-way trip. A definition in another file reveals and
+opens it; one that is not on disk — a location inside an archive, or a virtual
+document — is reported rather than attempted.
+
+The reply shape is not one thing. The protocol allows a bare `Location`, an array of
+them, an array of `LocationLink`, or null, and the five servers dxdiary ships specs for
+use at least three. `LocationLink` carries two ranges and the useful one is
+`targetSelectionRange`, the symbol, not `targetRange`, its whole body. rust-analyzer
+answers this way, so that path is exercised against a real server and not only the
+mock.
+
+**Making this work needed a cursor that could be aimed.** `h`/`l` panned the viewport,
+so the buffer cursor's column only ever changed in insert mode — which meant `K` and
+`ctrl-]` could only ask about column zero, and would have resolved whatever happened to
+start the line. Now the arrows move the cursor with the viewport following, `shift`
+plus an arrow pans for reading a long line, and the cursor is drawn as a reversed cell
+so you can see what you are about to ask about. Moving between lines carries the buffer
+cursor along, preserving its goal column.
+
+A reversed cell rather than a themed colour: the caret has to be obvious on top of
+whatever syntax and search have already done to that cell, and reversing is the one
+thing that always contrasts.
+
+The content pane's text width now has one definition, in `App`, because the horizontal
+scroll is clamped against it on a keystroke — before any frame exists. A zero width
+means nothing has been drawn yet; following the cursor against that scrolled the line
+clean off screen, which the test suite caught.
+
 ## 9. Risks
 
 | Risk | Severity | Status |

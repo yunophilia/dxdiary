@@ -17,7 +17,7 @@ Behaviour is deliberately simple and deterministic:
   textDocument/didSave  -> publishDiagnostics with message "saved"
   textDocument/didClose -> publishDiagnostics with an empty list
   textDocument/hover    -> hover text naming the position
-  textDocument/definition -> a location in the same file
+  textDocument/definition -> a location in a sibling file, defined.rs:3
   anything else with an id -> a JSON-RPC "method not found" error
   shutdown / exit       -> reply, then exit
 """
@@ -107,10 +107,12 @@ def main():
                 "value": "hover at %d:%d" % (pos["line"], pos["character"]),
             }})
         elif method == "textDocument/definition":
+            # A sibling file, so a client's cross-file jump is exercised.
             uri = msg["params"]["textDocument"]["uri"]
-            reply(msg_id, {"uri": uri,
-                           "range": {"start": {"line": 0, "character": 0},
-                                     "end": {"line": 0, "character": 1}}})
+            target = uri.rsplit("/", 1)[0] + "/defined.rs"
+            reply(msg_id, {"uri": target,
+                           "range": {"start": {"line": 2, "character": 4},
+                                     "end": {"line": 2, "character": 8}}})
         elif method == "shutdown":
             reply(msg_id, None)
         elif method == "exit":
