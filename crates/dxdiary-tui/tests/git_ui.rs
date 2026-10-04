@@ -1158,3 +1158,41 @@ fn a_quit_refusal_does_not_stand_in_for_an_open_confirmation() {
     app.reveal_and_open(root.join("second.rs"));
     assert_eq!(name_of(&app), "code.rs");
 }
+
+/// The colours of every character of `needle` on the row containing it.
+fn colors_over(app: &mut App, needle: &str) -> Vec<ratatui::style::Color> {
+    let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    let buf = term.backend().buffer();
+    for y in 0..buf.area.height {
+        let text: String = (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol())
+            .collect::<Vec<_>>()
+            .join("");
+        if let Some(byte) = text.find(needle) {
+            let col = text[..byte].chars().count();
+            return (0..needle.chars().count())
+                .map(|i| buf[((col + i) as u16, y)].fg)
+                .collect();
+        }
+    }
+    panic!("no row containing {needle:?}");
+}
+
+#[test]
+fn a_keyword_after_a_tab_indent_is_coloured_at_the_right_column() {
+    // Go is gofmt'd with tabs, so this is the common case, not an edge one.
+    // Highlight spans are character offsets into the raw line while the pane
+    // renders the line tab-expanded: without a mapping between the two, every
+    // colour on the row lands `tab_width - 1` columns early per tab.
+    let mut app = syntax_app("tab-go", "main.go", "func f() {\n\treturn\n}\n");
+    let indented = colors_over(&mut app, "return");
+
+    let mut plain = syntax_app("tab-go-plain", "other.go", "func f() {\nreturn\n}\n");
+    let expected = colors_over(&mut plain, "return");
+
+    assert_eq!(
+        indented, expected,
+        "a tab-indented keyword must be coloured over its whole width"
+    );
+}

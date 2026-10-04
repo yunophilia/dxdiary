@@ -130,23 +130,95 @@ fn is_binary(bytes: &[u8]) -> bool {
 /// the width it appears to. Control bytes in agent output would otherwise move
 /// the cursor and corrupt the frame.
 pub fn render_line(line: &str, tab_width: usize) -> String {
+    render_line_mapped(line, tab_width).0
+}
+
+/// Expand a line for display and report where each raw character landed.
+///
+/// `offsets[i]` is the display column of raw character `i`, with a final
+/// element holding the total width so a span's exclusive end maps without a
+/// special case.
+///
+/// Syntax highlighting produces character offsets into the *raw* line while
+/// the pane renders the *expanded* one. Without this mapping every colour on a
+/// tab-indented row lands `tab_width - 1` columns early per tab -- which is
+/// every row of gofmt'd Go, not an edge case.
+pub fn render_line_mapped(line: &str, tab_width: usize) -> (String, Vec<usize>) {
     let mut out = String::with_capacity(line.len());
+    let mut offsets = Vec::with_capacity(line.len() + 1);
+    // Tracked rather than recounted: `out.chars().count()` per character made
+    // this quadratic in line length.
+    let mut width = 0usize;
+
     for ch in line.chars() {
+        offsets.push(width);
         match ch {
             '\t' => {
-                let pad = tab_width - (out.chars().count() % tab_width.max(1));
+                let pad = tab_width - (width % tab_width.max(1));
                 out.extend(std::iter::repeat_n(' ', pad));
+                width += pad;
             }
-            c if c.is_control() => out.push('\u{fffd}'),
-            c => out.push(c),
+            c if c.is_control() => {
+                out.push('\u{fffd}');
+                width += 1;
+            }
+            c => {
+                out.push(c);
+                width += 1;
+            }
         }
     }
-    out
+    offsets.push(width);
+    (out, offsets)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_column_map_tracks_tab_expansion() {
+        let (text, offsets) = render_line_mapped("\tab", 4);
+        assert_eq!(text, "    ab");
+        // Raw char 0 is the tab at column 0; `a` lands at column 4.
+        assert_eq!(
+            offsets,
+            vec![0, 4, 5, 6],
+            "trailing entry is the full width"
+        );
+    }
+
+    #[test]
+    fn a_tab_advances_to_the_next_stop_not_a_fixed_width() {
+        let (text, offsets) = render_line_mapped("ab\tc", 4);
+        assert_eq!(text, "ab  c");
+        assert_eq!(offsets, vec![0, 1, 2, 4, 5]);
+    }
+
+    #[test]
+    fn the_map_covers_every_character_of_a_line_without_tabs() {
+        let (text, offsets) = render_line_mapped("abc", 4);
+        assert_eq!(text, "abc");
+        assert_eq!(offsets, vec![0, 1, 2, 3], "an identity map, plus the width");
+    }
+
+    #[test]
+    fn a_control_character_occupies_one_column_like_its_replacement() {
+        let (text, offsets) = render_line_mapped("a\u{7}b", 4);
+        assert_eq!(text, "a\u{fffd}b");
+        assert_eq!(offsets, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn expansion_and_the_mapped_form_agree() {
+        for line in ["", "\t", "\t\t", "x\ty", "\u{3b1}\t\u{3b2}", "no tabs here"] {
+            assert_eq!(
+                render_line(line, 4),
+                render_line_mapped(line, 4).0,
+                "render_line delegates, so the two cannot drift: {line:?}"
+            );
+        }
+    }
 
     fn write(tag: &str, content: &[u8]) -> PathBuf {
         let p = std::env::temp_dir().join(format!("dxdiary-doc-{tag}"));

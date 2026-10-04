@@ -4,7 +4,7 @@
 //! draws. Rebuilding the map each frame is what keeps clicks correct after a
 //! resize or a scroll — there is no second source of truth to drift.
 
-use dxdiary_core::document::render_line;
+use dxdiary_core::document::render_line_mapped;
 use dxdiary_core::{Document, HitMap, HitTarget, PaneId, Theme};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -140,6 +140,8 @@ fn role_color(role: dxdiary_syntax::Role, p: &Palette) -> Color {
 fn highlighted_spans(
     text: &str,
     spans: &[dxdiary_syntax::Span],
+    // Raw-character index to display column, from `render_line_mapped`.
+    offsets: &[usize],
     scroll_x: usize,
     width: usize,
     base: Style,
@@ -154,12 +156,14 @@ fn highlighted_spans(
     // Per-character colour, then run-length encoded: simpler than interval
     // arithmetic, and highlight spans can overlap when captures nest.
     let mut colors: Vec<Option<Color>> = vec![None; chars.len()];
+    // Spans index the raw line; `colors` indexes the expanded one.
+    let column = |raw: usize| offsets.get(raw).copied().unwrap_or(chars.len());
     for s in spans {
         let color = role_color(s.role, p);
         for slot in colors
             .iter_mut()
-            .take(s.end.min(chars.len()))
-            .skip(s.start.min(chars.len()))
+            .take(column(s.end).min(chars.len()))
+            .skip(column(s.start).min(chars.len()))
         {
             *slot = Some(color);
         }
@@ -261,7 +265,7 @@ fn diff_lines<'a>(
                 None => " ".repeat(numw + 1),
             };
 
-            let body = dxdiary_core::document::render_line(&line.text, app.config.tab_width);
+            let (body, offsets) = render_line_mapped(&line.text, app.config.tab_width);
 
             let mut style = Style::default().fg(fg);
             if let Some(bg) = bg {
@@ -289,6 +293,7 @@ fn diff_lines<'a>(
                 Some(s) if line.kind == LineKind::Context => spans.extend(highlighted_spans(
                     &body,
                     s,
+                    &offsets,
                     app.doc_scroll_x,
                     text_width,
                     style,
@@ -530,7 +535,7 @@ pub(crate) fn render_content(f: &mut Frame, area: Rect, app: &App, hits: &mut Hi
                 .skip(app.doc_scroll_y)
                 .take(height)
                 .map(|(n, raw)| {
-                    let expanded = render_line(raw, app.config.tab_width);
+                    let (expanded, offsets) = render_line_mapped(raw, app.config.tab_width);
 
                     let current = n == app.doc_line;
                     let number = Span::styled(
@@ -561,6 +566,7 @@ pub(crate) fn render_content(f: &mut Frame, area: Rect, app: &App, hits: &mut Hi
                         Some(s) => spans.extend(highlighted_spans(
                             &expanded,
                             s,
+                            &offsets,
                             app.doc_scroll_x,
                             text_width,
                             base,
