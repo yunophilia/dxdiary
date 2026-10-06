@@ -184,6 +184,28 @@ fn main() -> anyhow::Result<()> {
         eprintln!("landed: {}", app.status);
     }
 
+    // `DXDIARY_GREP=query` runs a repo-wide search so a shot shows the results
+    // pane. The walk is threaded, so this waits for it.
+    if let Ok(q) = std::env::var("DXDIARY_GREP") {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let press = |app: &mut dxdiary_tui::App, code| {
+            app.handle(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        };
+        press(&mut app, KeyCode::Char('*'));
+        for ch in q.chars() {
+            press(&mut app, KeyCode::Char(ch));
+        }
+        press(&mut app, KeyCode::Enter);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while std::time::Instant::now() < deadline {
+            if app.poll_grep() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        eprintln!("{}", app.status);
+    }
+
     let mut term = Terminal::new(TestBackend::new(w, h))?;
     term.draw(|f| app.render(f))?;
 

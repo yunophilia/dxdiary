@@ -49,6 +49,8 @@ pub enum Mode {
 pub enum Asking {
     Search,
     Goto,
+    /// Search every file in the worktree, not just the open one.
+    Grep,
 }
 
 impl Asking {
@@ -58,6 +60,7 @@ impl Asking {
         match self {
             Asking::Search => '/',
             Asking::Goto => ':',
+            Asking::Grep => '*',
         }
     }
 }
@@ -154,6 +157,14 @@ pub struct App {
     pub search: Option<dxdiary_core::Search>,
     prompt: Option<Prompt>,
 
+    /// Repo-wide results. While this is set the tree pane shows them instead
+    /// of the file tree, so `tree_sel` indexes hits rather than rows and
+    /// every movement key keeps working unchanged.
+    pub grep: Option<dxdiary_core::Report>,
+    grep_rx: Option<std::sync::mpsc::Receiver<dxdiary_core::Report>>,
+    /// Where the tree cursor was before the results took the pane over.
+    tree_sel_saved: usize,
+
     // --- syntax ---------------------------------------------------------
     highlighter: dxdiary_syntax::Highlighter,
     /// Detected language of the open file, if it is one dxdiary knows.
@@ -224,6 +235,9 @@ impl App {
             discard_armed: None,
             search: None,
             prompt: None,
+            grep: None,
+            grep_rx: None,
+            tree_sel_saved: 0,
             highlighter: dxdiary_syntax::Highlighter::new(),
             language: None,
             doc_spans: Vec::new(),
@@ -325,7 +339,7 @@ impl App {
                 self.tree_sel = pos;
             }
         }
-        self.tree_sel = self.tree_sel.min(self.visible.len().saturating_sub(1));
+        self.tree_sel = self.tree_sel.min(self.tree_rows().saturating_sub(1));
         self.clamp_tree();
     }
 
@@ -388,7 +402,7 @@ impl App {
             }
 
             // While an edit is waiting to be sent, wake early enough to send it.
-            let wait = if self.lsp_change_at.is_some() {
+            let wait = if self.lsp_change_at.is_some() || self.grep_rx.is_some() {
                 CHANGE_DEBOUNCE
             } else {
                 POLL
@@ -407,6 +421,7 @@ impl App {
             // input. Checking here rather than on a timer keeps idling silent.
             dirty |= self.poll_blame();
             dirty |= self.poll_lsp();
+            dirty |= self.poll_grep();
         }
         Ok(())
     }
@@ -574,7 +589,9 @@ impl App {
             // reflex is to press it to clear the highlight, and losing the
             // session to that would be its own small disaster.
             KeyCode::Esc => {
-                if self.search.take().is_some() {
+                if self.close_grep() {
+                    self.status = "results closed".into();
+                } else if self.search.take().is_some() {
                     self.status = "search cleared".into();
                 } else if self.may_discard(Discard::Quit) {
                     self.quit = true;
@@ -582,6 +599,7 @@ impl App {
                 true
             }
             KeyCode::Char('/') => self.begin_prompt(Asking::Search),
+            KeyCode::Char('*') => self.begin_prompt(Asking::Grep),
             KeyCode::Char(':') => self.begin_prompt(Asking::Goto),
             KeyCode::Char('n') => self.step_search(true),
             KeyCode::Char('N') => self.step_search(false),
@@ -648,7 +666,7 @@ impl App {
 
     fn move_by(&mut self, delta: isize) -> bool {
         let (cur, max) = match self.focus {
-            PaneId::Tree => (self.tree_sel, self.visible.len().saturating_sub(1)),
+            PaneId::Tree => (self.tree_sel, self.tree_rows().saturating_sub(1)),
             PaneId::Content => (self.doc_line, self.content_rows().saturating_sub(1)),
         };
         let next = if delta < 0 {
@@ -662,13 +680,17 @@ impl App {
     fn move_to(&mut self, index: usize) -> bool {
         match self.focus {
             PaneId::Tree => {
-                let max = self.visible.len().saturating_sub(1);
+                let max = self.tree_rows().saturating_sub(1);
                 let next = index.min(max);
                 if next == self.tree_sel {
                     return false;
                 }
                 self.tree_sel = next;
                 self.clamp_tree();
+                // The rows show a basename only, so say where it lives.
+                if self.grep.is_some() {
+                    self.status = self.selected_hit_path();
+                }
             }
             PaneId::Content => {
                 let max = self.content_rows().saturating_sub(1);
@@ -712,10 +734,19 @@ impl App {
                 true
             }
             HitTarget::Divider => false,
+            HitTarget::TreeBody if self.grep.is_some() => {
+                let index = self.tree_scroll + hit.local_row as usize;
+                if index >= self.tree_rows() {
+                    return false;
+                }
+                self.focus = PaneId::Tree;
+                self.tree_sel = index;
+                self.open_hit()
+            }
             HitTarget::TreeBody => {
                 self.focus = PaneId::Tree;
                 let index = self.tree_scroll + hit.local_row as usize;
-                if index >= self.visible.len() {
+                if index >= self.tree_rows() {
                     return true; // clicked past the last row; just take focus
                 }
                 self.tree_sel = index;
@@ -739,7 +770,7 @@ impl App {
         let target = self.hits.resolve(col, row).map(|h| h.target);
         match target {
             Some(HitTarget::TreeBody) => {
-                let max = self.visible.len().saturating_sub(self.tree_h);
+                let max = self.tree_rows().saturating_sub(self.tree_h);
                 self.tree_scroll = shift(self.tree_scroll, delta, max);
                 true
             }
@@ -762,6 +793,9 @@ impl App {
     fn activate(&mut self) -> bool {
         if self.focus == PaneId::Content {
             return false;
+        }
+        if self.grep.is_some() {
+            return self.open_hit();
         }
         let Some(idx) = self.real_row() else {
             return false;
@@ -1430,8 +1464,19 @@ impl App {
     }
 
     fn begin_prompt(&mut self, asking: Asking) -> bool {
-        if self.text_line_count() == 0 {
+        // A repo-wide search needs no open file; the other two address lines
+        // in one.
+        if asking != Asking::Grep && self.text_line_count() == 0 {
             self.status = "no file open".into();
+            return true;
+        }
+        if asking == Asking::Grep {
+            self.mode = Mode::Prompt;
+            self.prompt = Some(Prompt {
+                asking,
+                input: String::new(),
+                restore: (self.doc_line, self.doc_scroll_y),
+            });
             return true;
         }
         // Both answers address file lines, so neither means anything against
@@ -1472,6 +1517,7 @@ impl App {
                 match asking {
                     Asking::Search => self.commit_search(&input, restore.0),
                     Asking::Goto => self.commit_goto(&input),
+                    Asking::Grep => self.commit_grep(&input),
                 }
             }
             KeyCode::Backspace => {
@@ -1553,6 +1599,117 @@ impl App {
             }
             Err(_) => self.status = "cancelled".into(),
         }
+    }
+
+    /// Start a repo-wide search (`*`).
+    fn commit_grep(&mut self, query: &str) {
+        if query.is_empty() {
+            self.status = "search cancelled".into();
+            return;
+        }
+        // Off the render thread: a walk of a large worktree takes long enough
+        // to drop a frame, the same reason blame is threaded.
+        self.grep_rx = Some(dxdiary_core::grep::spawn(
+            self.tree.root.clone(),
+            query.to_string(),
+            self.config.max_file_bytes,
+        ));
+        self.status = format!("searching the tree for {query:?}…");
+    }
+
+    /// Collect a finished repo-wide search.
+    pub fn poll_grep(&mut self) -> bool {
+        let Some(rx) = &self.grep_rx else {
+            return false;
+        };
+        match rx.try_recv() {
+            Ok(report) => {
+                self.grep_rx = None;
+                self.status = report.summary();
+                if report.is_empty() {
+                    // Nothing to show, so do not take the pane over for an
+                    // empty list.
+                    self.grep = None;
+                } else {
+                    if self.grep.is_none() {
+                        self.tree_sel_saved = self.tree_sel;
+                    }
+                    self.grep = Some(report);
+                    self.tree_sel = 0;
+                    self.tree_scroll = 0;
+                    self.focus = PaneId::Tree;
+                }
+                true
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.grep_rx = None;
+                false
+            }
+        }
+    }
+
+    /// Relative path of the selected result, for the status bar.
+    fn selected_hit_path(&self) -> String {
+        let Some(hit) = self.grep.as_ref().and_then(|r| r.hits.get(self.tree_sel)) else {
+            return String::new();
+        };
+        format!(
+            "{}:{}",
+            hit.path
+                .strip_prefix(&self.tree.root)
+                .unwrap_or(&hit.path)
+                .to_string_lossy()
+                .replace('\\', "/"),
+            hit.line + 1
+        )
+    }
+
+    /// Put the file tree back. Returns whether there was anything to close.
+    fn close_grep(&mut self) -> bool {
+        if self.grep.take().is_none() {
+            return false;
+        }
+        self.tree_sel = self
+            .tree_sel_saved
+            .min(self.visible.len().saturating_sub(1));
+        self.clamp_tree();
+        true
+    }
+
+    /// Open the result under the cursor.
+    fn open_hit(&mut self) -> bool {
+        let Some(hit) = self
+            .grep
+            .as_ref()
+            .and_then(|r| r.hits.get(self.tree_sel))
+            .cloned()
+        else {
+            return false;
+        };
+
+        let query = self
+            .grep
+            .as_ref()
+            .map(|r| r.query.clone())
+            .unwrap_or_default();
+        self.open(hit.path.clone());
+        // The open can be refused by an unsaved buffer, in which case staying
+        // put is the right outcome and the status already says why.
+        if self.doc.as_ref().map(|d| d.path()) != Some(hit.path.as_path()) {
+            return true;
+        }
+
+        // Highlight the same query in the file, so arriving from a result
+        // shows every other hit on the way past.
+        self.view = ContentView::File;
+        self.run_search(&query, hit.line);
+        self.doc_line = hit.line;
+        if let Some(buf) = &mut self.buffer {
+            buf.move_to(hit.line, hit.start);
+        }
+        self.clamp_content();
+        true
     }
 
     fn step_search(&mut self, forward: bool) -> bool {
@@ -1861,12 +2018,20 @@ impl App {
         }
     }
 
+    /// Rows the tree pane can scroll through, whichever mode it is in.
+    pub fn tree_rows(&self) -> usize {
+        match &self.grep {
+            Some(r) => r.len(),
+            None => self.visible.len(),
+        }
+    }
+
     fn clamp_tree(&mut self) {
         self.tree_scroll = clamp_scroll(
             self.tree_sel,
             self.tree_scroll,
             self.tree_h,
-            self.visible.len(),
+            self.tree_rows(),
         );
     }
 
@@ -1906,11 +2071,16 @@ impl App {
         let [body, status] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
 
-        let [tree_area, content_area] = Layout::horizontal([
-            Constraint::Percentage(self.config.tree_width_percent()),
-            Constraint::Min(10),
-        ])
-        .areas(body);
+        // Search results need more room than a file tree: a line of code plus
+        // its location does not fit in a third of an 80-column terminal, and
+        // the code is the half you actually read.
+        let left = if self.grep.is_some() {
+            self.config.tree_width_percent().max(55)
+        } else {
+            self.config.tree_width_percent()
+        };
+        let [tree_area, content_area] =
+            Layout::horizontal([Constraint::Percentage(left), Constraint::Min(10)]).areas(body);
 
         // Apply sizes *before* drawing, not after. Layout already knows them,
         // and scroll clamping needs real numbers — running it against the

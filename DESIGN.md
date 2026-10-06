@@ -597,6 +597,31 @@ scroll is clamped against it on a keystroke — before any frame exists. A zero 
 means nothing has been drawn yet; following the cursor against that scrolled the line
 clean off screen, which the test suite caught.
 
+### Phase 10 — searching the tree — **done**
+
+`*` searches every file under the worktree root. Matching is the in-file `Search` run
+per file, so smart case, overlap handling and character offsets are identical — one set
+of semantics, learned once, rather than a second grep with its own quirks.
+
+Threaded, like blame: a walk of a large worktree takes long enough to drop a frame, so
+the UI polls for a report instead of waiting for one.
+
+Results take over the tree pane rather than opening a third. The trick that keeps this
+cheap is that `tree_sel` indexes hits while they are showing, so every movement key,
+the scroll clamp and the click path work unchanged — the only thing that had to learn
+about the mode is the row count, which is now one method.
+
+The left pane widens to at least 55% while results show. A relative path plus a line of
+code does not fit in a third of an 80-column terminal, and the code is the half you
+read; the rows carry a basename and the selected row's full path goes to the status bar.
+
+Skips the same directories `tree.rs` hides, so a result can never point at a file the
+tree refuses to show. `.gitignore` is still not consulted by either, which has been
+true and noted since phase 2.
+
+Capped at 500 hits, and the report says when it stopped early. A one-character query
+over a large tree would otherwise fill memory with a list nobody will scroll.
+
 ## 9. Risks
 
 | Risk | Severity | Status |

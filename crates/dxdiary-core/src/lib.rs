@@ -6,6 +6,7 @@
 pub mod buffer;
 pub mod config;
 pub mod document;
+pub mod grep;
 pub mod hit;
 pub mod search;
 pub mod tree;
@@ -13,6 +14,7 @@ pub mod tree;
 pub use buffer::{Buffer, Cursor};
 pub use config::{ColorDepth, Config, Rgb, Theme};
 pub use document::{Document, TextDocument};
+pub use grep::Report;
 pub use hit::{Hit, HitMap, HitTarget, PaneId};
 pub use search::{Match, Search};
 pub use tree::{FileTree, Row};

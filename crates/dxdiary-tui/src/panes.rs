@@ -398,16 +398,88 @@ fn frame(app: &App, pane: PaneId, title: &str, p: &Palette) -> Block<'static> {
         ))
 }
 
+/// Repo-wide search results, one line per hit.
+///
+/// `name:line` then the matching text with the match itself picked out.
+///
+/// The basename, not the path: even a relative path eats a narrow pane and is
+/// mostly prefix you already know, while the matching line is what you are
+/// reading. The selected row's full path goes to the status bar instead, so it
+/// is always one glance away.
+fn grep_lines<'a>(
+    report: &dxdiary_core::Report,
+    app: &App,
+    p: &Palette,
+    height: usize,
+) -> Vec<Line<'a>> {
+    let mut lines = Vec::with_capacity(height);
+    for (pos, hit) in report
+        .hits
+        .iter()
+        .enumerate()
+        .skip(app.tree_scroll)
+        .take(height)
+    {
+        let selected = pos == app.tree_sel;
+        let name = hit
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        let mut spans = vec![
+            Span::styled(name, Style::default().fg(p.directory)),
+            Span::styled(format!(":{} ", hit.line + 1), Style::default().fg(p.gutter)),
+        ];
+
+        // Leading whitespace is noise in a one-line preview, but dropping it
+        // moves the match, so the offsets are shifted by however much went.
+        let trimmed = hit.text.trim_start();
+        let shift = hit.text.chars().count() - trimmed.chars().count();
+        let chars: Vec<char> = trimmed.chars().collect();
+        let start = hit.start.saturating_sub(shift).min(chars.len());
+        let end = hit.end.saturating_sub(shift).min(chars.len());
+
+        let take = |r: std::ops::Range<usize>| chars[r].iter().collect::<String>();
+        spans.push(Span::styled(take(0..start), Style::default().fg(p.dim)));
+        spans.push(Span::styled(
+            take(start..end),
+            Style::default().fg(p.fg).bg(p.match_bg),
+        ));
+        spans.push(Span::styled(
+            take(end..chars.len()),
+            Style::default().fg(p.dim),
+        ));
+
+        let line = Line::from(spans);
+        lines.push(if selected && app.focus == PaneId::Tree {
+            line.style(Style::default().bg(p.selection_bg))
+        } else {
+            line
+        });
+    }
+    lines
+}
+
 pub(crate) fn render_tree(f: &mut Frame, area: Rect, app: &App, hits: &mut HitMap) {
     let p = Palette::new(&app.config.theme, app.depth);
 
-    let title = app
+    let root_name = app
         .tree
         .root
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("root");
-    let block = frame(app, PaneId::Tree, title, &p);
+    let title = match &app.grep {
+        Some(r) => format!(
+            "{} hit{}{} · esc for the tree",
+            r.len(),
+            if r.len() == 1 { "" } else { "s" },
+            if r.truncated { " (capped)" } else { "" }
+        ),
+        None => root_name.to_string(),
+    };
+    let block = frame(app, PaneId::Tree, &title, &p);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -419,6 +491,12 @@ pub(crate) fn render_tree(f: &mut Frame, area: Rect, app: &App, hits: &mut HitMa
     );
 
     let height = inner.height as usize;
+
+    if let Some(report) = &app.grep {
+        f.render_widget(Paragraph::new(grep_lines(report, app, &p, height)), inner);
+        return;
+    }
+
     let rows = app.tree.rows();
     let visible = app.visible_rows();
 

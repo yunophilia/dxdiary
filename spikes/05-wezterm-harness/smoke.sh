@@ -151,6 +151,17 @@ check    "the goto prompt echoes the number"            ":3"
 keys $'\r'
 check    "it reports the line it went to"               "line 3"
 
+# --- repo-wide search -----------------------------------------------------
+# Threaded, so this leans on wait_for rather than guessing how long a walk of
+# the checkout takes on a cold runner.
+keys "*"
+keys "alpha"
+keys $'\r'
+check    "a repo-wide search reports its hits"          "hit"
+check    "the results list the matching code"           "fn alpha"
+keys $'\e'
+check    "esc gives the tree back"                      "results closed"
+
 # --- git ------------------------------------------------------------------
 keys "b"
 check    "b cycles the diff baseline"                   "staged"

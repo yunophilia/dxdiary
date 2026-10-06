@@ -8,7 +8,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use dxdiary_core::{ColorDepth, Config};
 use dxdiary_tui::App;
 use dxdiary_vcs::GitRepo;
@@ -1812,4 +1814,255 @@ fn moving_down_keeps_the_column_for_the_servers_benefit() {
     let buf = app.buffer.as_ref().unwrap();
     assert_eq!(buf.cursor.line, 1, "the buffer cursor came along");
     assert_eq!(buf.cursor.column, 3);
+}
+
+// ------------------------------------------------------- repo-wide search
+
+/// A small worktree with the needle in two files, plus a decoy under
+/// `target/` that must never be reported.
+fn grep_app(tag: &str) -> App {
+    let root = std::env::temp_dir().join(format!("dxdiary-grepui-{tag}"));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("target")).unwrap();
+    write(&root, "a.rs", "fn one() {}\nfn needle_here() {}\n");
+    write(
+        &root,
+        "src/b.rs",
+        "fn two() {}\nfn three() {}\n    needle_indented();\n",
+    );
+    write(&root, "target/junk.rs", "fn needle_in_build_output() {}\n");
+
+    let mut app = App::new(root.clone(), Config::default(), ColorDepth::TrueColor);
+    app.reveal_and_open(root.join("a.rs"));
+    app
+}
+
+/// Run a repo-wide search and wait for the worker, which is threaded.
+fn grep_for(app: &mut App, query: &str) {
+    key(app, KeyCode::Char('*'));
+    typed(app, query);
+    key(app, KeyCode::Enter);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        if app.poll_grep() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("the repo-wide search never reported: {}", app.status);
+}
+
+fn click_at(app: &mut App, col: u16, row: u16) -> bool {
+    app.handle(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: col,
+        row,
+        modifiers: KeyModifiers::NONE,
+    }))
+}
+
+#[test]
+fn star_opens_a_prompt_of_its_own() {
+    let mut app = grep_app("prompt");
+    key(&mut app, KeyCode::Char('*'));
+    assert_eq!(app.mode, dxdiary_tui::Mode::Prompt);
+    typed(&mut app, "need");
+    assert_eq!(
+        app.prompt_line().unwrap(),
+        "*need\u{2588}",
+        "a different prefix from / so there is no doubt which is open"
+    );
+}
+
+#[test]
+fn a_repo_wide_search_finds_hits_in_several_files() {
+    let mut app = grep_app("across");
+    grep_for(&mut app, "needle");
+
+    let report = app.grep.as_ref().expect("results");
+    assert_eq!(report.len(), 2, "{:?}", report.hits);
+    assert_eq!(report.file_count(), 2);
+    assert!(app.status.contains("2 hits in 2 files"), "{}", app.status);
+}
+
+#[test]
+fn build_output_is_not_reported() {
+    // The tree hides target/, so a result pointing into it would be a row you
+    // cannot reach any other way.
+    let mut app = grep_app("skip");
+    grep_for(&mut app, "needle");
+    assert!(
+        app.grep
+            .as_ref()
+            .unwrap()
+            .hits
+            .iter()
+            .all(|h| !h.path.to_string_lossy().contains("target")),
+        "{:?}",
+        app.grep.as_ref().unwrap().hits
+    );
+}
+
+#[test]
+fn the_results_take_over_the_tree_pane() {
+    let mut app = grep_app("pane");
+    let before = draw(&mut app);
+    assert!(before.contains("a.rs"), "the tree was showing");
+
+    grep_for(&mut app, "needle");
+    let after = draw(&mut app);
+    assert!(
+        after.contains("2 hits"),
+        "the title says what is listed:\n{after}"
+    );
+    assert!(
+        after.contains("needle_here"),
+        "the matching line is readable, not just the path:\n{after}"
+    );
+}
+
+#[test]
+fn a_query_with_no_match_does_not_take_the_pane_over() {
+    let mut app = grep_app("nomatch");
+    grep_for(&mut app, "zzzznope");
+    assert!(app.grep.is_none(), "an empty list is not worth a pane");
+    assert!(app.status.contains("no match"), "{}", app.status);
+    assert!(draw(&mut app).contains("a.rs"), "the tree is still there");
+}
+
+#[test]
+fn enter_on_a_result_opens_that_file_at_that_line() {
+    let mut app = grep_app("open");
+    grep_for(&mut app, "needle");
+
+    // The second hit is in src/b.rs, on its third line.
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Enter);
+
+    assert_eq!(name_of(&app), "b.rs", "{}", app.status);
+    assert_eq!(app.doc_line, 2, "0-based, so line 3");
+}
+
+#[test]
+fn opening_a_result_highlights_the_same_query_in_the_file() {
+    // Arriving from a result should show every other hit on the way past,
+    // rather than landing with nothing marked.
+    let mut app = grep_app("highlight");
+    grep_for(&mut app, "needle");
+    key(&mut app, KeyCode::Enter);
+
+    let search = app.search.as_ref().expect("the file search was seeded");
+    assert_eq!(search.query, "needle");
+    assert!(!search.is_empty());
+}
+
+#[test]
+fn clicking_a_result_opens_it() {
+    let mut app = grep_app("click");
+    grep_for(&mut app, "needle");
+    // Draw so the hit map knows where the pane is.
+    let _ = draw(&mut app);
+
+    // Row 1 of the pane body is the second result; the border is row 0.
+    assert!(click_at(&mut app, 3, 2));
+    assert_eq!(name_of(&app), "b.rs", "{}", app.status);
+}
+
+#[test]
+fn moving_through_results_says_which_file_each_is_in() {
+    // The rows show a basename only, so the path has to surface somewhere.
+    let mut app = grep_app("paths");
+    grep_for(&mut app, "needle");
+    key(&mut app, KeyCode::Down);
+    assert!(
+        app.status.contains("src/b.rs:3"),
+        "the full relative path and line: {}",
+        app.status
+    );
+}
+
+#[test]
+fn esc_closes_the_results_and_puts_the_tree_cursor_back() {
+    let mut app = grep_app("close");
+    key(&mut app, KeyCode::Down);
+    let before = app.tree_sel;
+    assert!(before > 0, "moved somewhere worth restoring");
+
+    grep_for(&mut app, "needle");
+    assert_eq!(app.tree_sel, 0, "results start at the top");
+
+    key(&mut app, KeyCode::Esc);
+    assert!(app.grep.is_none());
+    assert_eq!(app.tree_sel, before, "the tree cursor came back");
+    assert!(!app.quit, "esc closed the results rather than quitting");
+}
+
+#[test]
+fn esc_closes_results_before_it_clears_a_search() {
+    // Both are dismissible, and the results are the thing most recently put
+    // on screen, so they go first.
+    let mut app = grep_app("order");
+    grep_for(&mut app, "needle");
+    key(&mut app, KeyCode::Enter);
+    assert!(app.search.is_some() && app.grep.is_some());
+
+    key(&mut app, KeyCode::Esc);
+    assert!(app.grep.is_none(), "results closed");
+    assert!(app.search.is_some(), "the file highlight survived");
+
+    key(&mut app, KeyCode::Esc);
+    assert!(app.search.is_none(), "then the highlight");
+    assert!(!app.quit);
+}
+
+#[test]
+fn results_scroll_rather_than_clamping_to_the_tree_length() {
+    // tree_sel indexes hits while results show; if the clamp still used the
+    // file tree's length the cursor could not reach the later hits.
+    let root = std::env::temp_dir().join("dxdiary-grepui-many");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    write(&root, "one.rs", &"needle\n".repeat(40));
+    let mut app = App::new(root.clone(), Config::default(), ColorDepth::TrueColor);
+    app.reveal_and_open(root.join("one.rs"));
+
+    grep_for(&mut app, "needle");
+    assert_eq!(app.tree_rows(), 40, "one file, forty hits");
+
+    key(&mut app, KeyCode::Char('G'));
+    assert_eq!(app.tree_sel, 39, "the last hit is reachable");
+}
+
+#[test]
+fn a_repo_wide_search_works_with_no_file_open() {
+    // Unlike / and :, it does not address lines in an open document.
+    let root = std::env::temp_dir().join("dxdiary-grepui-nofile");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    write(&root, "a.rs", "needle\n");
+    let mut app = App::new(root.clone(), Config::default(), ColorDepth::TrueColor);
+
+    assert!(app.buffer.is_none(), "nothing open");
+    grep_for(&mut app, "needle");
+    assert_eq!(app.grep.as_ref().unwrap().len(), 1);
+}
+
+#[test]
+fn opening_a_result_is_refused_rather_than_losing_unsaved_edits() {
+    let mut app = grep_app("dirty");
+    key(&mut app, KeyCode::Tab);
+    key(&mut app, KeyCode::Char('i'));
+    typed(&mut app, "x");
+    key(&mut app, KeyCode::Esc);
+    assert!(app.is_dirty());
+
+    grep_for(&mut app, "needle");
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Enter);
+
+    assert_eq!(name_of(&app), "a.rs", "stayed on the dirty file");
+    assert!(app.is_dirty(), "the edit survived");
+    assert!(app.status.contains("unsaved"), "{}", app.status);
 }

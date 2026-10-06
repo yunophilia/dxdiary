@@ -54,11 +54,24 @@ Finding things:
 |---|---|
 | `/` | search the open file — live as you type, `esc` cancels and puts the cursor back |
 | `n` / `N` | next / previous match, wrapping |
+| `*` | search every file in the worktree; results take the left pane |
 | `:` | go to a line number |
 
 Search is literal, not regex, and smart-cased: an all-lowercase query matches any
 case, and typing a capital means you meant it. Matches are shaded, the one you are on
 more strongly, and the count sits in the status bar.
+
+`*` searches the whole tree with the same matching rules. Results list as
+`name:line` plus the matching code, and the left pane widens to make room for it —
+a line of code does not fit in a third of an 80-column terminal. Enter or a click
+opens the file at that line and highlights the same query in it, so you see the other
+hits on the way past. The selected row's full path is in the status bar, since the rows
+show only a basename. `esc` gives the tree back.
+
+Skipped: `.git`, `target`, `node_modules`, `.venv`, `__pycache__` — the same list the
+tree hides, so a result can never point at a file you cannot otherwise reach. Binary
+files and anything over `max_file_bytes` are skipped too, and the list caps at 500 hits
+and says when it did.
 
 Editing:
 
