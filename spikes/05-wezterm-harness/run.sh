@@ -17,6 +17,7 @@ TOOLS="${TOOLS:-$HOME/tools}"
 WEZTERM="$TOOLS/squashfs-root/usr/bin/wezterm"
 MUX="$TOOLS/squashfs-root/usr/bin/wezterm-mux-server"
 ZSH="$TOOLS/zsh/bin/zsh"
+[ -x "$ZSH" ] || ZSH="$(command -v zsh 2>/dev/null || echo /nonexistent)"
 
 # wezterm-mux-server needs a writable runtime directory for its socket. WSL
 # does not always create /run/user/$UID -- it is gone after the distro

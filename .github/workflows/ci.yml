@@ -1,0 +1,102 @@
+name: ci
+
+# Every push and every pull request. release.yml also runs the suite, but only
+# on a tag, which is far too late to learn that main is broken.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# Nothing here writes to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Deliberately no global RUSTFLAGS: -D warnings there would apply to every
+  # dependency too, so a new lint in a crate we do not own could fail the
+  # build. The clippy step denies warnings for our crates only, which is the
+  # part we can actually fix.
+
+jobs:
+  suite:
+    name: fmt · clippy · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Lints
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # python3 backs the mock language server the LSP round-trip tests drive;
+      # it is preinstalled on ubuntu runners, but a missing one makes those
+      # tests skip silently rather than fail, so say so out loud.
+      - name: Record the test environment
+        run: |
+          python3 --version
+          git --version
+          cc --version | head -1
+
+      - name: Tests
+        run: cargo test --workspace --locked
+
+  # The suite covers everything that can be asserted without a terminal. This
+  # job covers what cannot: capability negotiation over a real PTY, raw-mode
+  # key decoding, and whether quitting gives the shell back.
+  terminal:
+    name: real terminal (WezTerm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install zsh
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
+
+      # Pinned, and the checksum is verified: a harness that silently tests a
+      # different terminal than the one the findings were recorded against is
+      # worse than no harness.
+      - name: Fetch WezTerm
+        env:
+          WEZTERM_TAG: 20240203-110809-5046fc22
+        run: |
+          set -euo pipefail
+          asset="WezTerm-${WEZTERM_TAG}-Ubuntu20.04.AppImage"
+          base="https://github.com/wez/wezterm/releases/download/${WEZTERM_TAG}"
+          curl -fsSL -o wezterm.AppImage "${base}/${asset}"
+          curl -fsSL -o wezterm.sha256 "${base}/${asset}.sha256"
+          # The published file is "<sha>  <asset>"; check against our filename.
+          echo "$(cut -d' ' -f1 wezterm.sha256)  wezterm.AppImage" | sha256sum -c -
+          chmod +x wezterm.AppImage
+          # Extract rather than mount: runners have no FUSE.
+          ./wezterm.AppImage --appimage-extract >/dev/null
+          mkdir -p "$HOME/tools"
+          mv squashfs-root "$HOME/tools/"
+          "$HOME/tools/squashfs-root/usr/bin/wezterm" --version
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Install
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          install -m755 target/release/dxdiary "$HOME/.local/bin/dxdiary"
+
+      - name: Capability detection
+        run: ./spikes/05-wezterm-harness/run.sh "$HOME/.local/bin/dxdiary"
+
+      - name: Interactive smoke test
+        run: ./spikes/05-wezterm-harness/smoke.sh "$HOME/.local/bin/dxdiary" "$PWD"

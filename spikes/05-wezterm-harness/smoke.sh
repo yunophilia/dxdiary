@@ -68,7 +68,10 @@ out=$(screen)
 check    "the TUI painted its panes"        "$out" "┌"
 check    "it opened the file named on the command line" "$out" "smoke-target.rs"
 check    "the file's contents are shown"    "$out" "fn alpha()"
-check    "the status bar shows the branch"  "$out" "main"
+# Not the branch name: CI checks out a detached HEAD, and anyone on a
+# feature branch would see a false failure. The baseline label only
+# renders when a repository actually attached, which is the claim.
+check    "the git layer attached"           "$out" "unstaged"
 
 # Search. The file has two `alpha` matches and one `beta`.
 keys $'\t'
