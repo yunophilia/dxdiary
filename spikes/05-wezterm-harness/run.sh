@@ -18,6 +18,17 @@ WEZTERM="$TOOLS/squashfs-root/usr/bin/wezterm"
 MUX="$TOOLS/squashfs-root/usr/bin/wezterm-mux-server"
 ZSH="$TOOLS/zsh/bin/zsh"
 
+# wezterm-mux-server needs a writable runtime directory for its socket. WSL
+# does not always create /run/user/$UID -- it is gone after the distro
+# restarts, and XDG_RUNTIME_DIR still points at it -- so fall back to one that
+# always exists rather than failing with a bare "Permission denied".
+if [ ! -w "${XDG_RUNTIME_DIR:-/nonexistent}" ]; then
+  XDG_RUNTIME_DIR="$HOME/.cache/dxdiary-runtime"
+  mkdir -p "$XDG_RUNTIME_DIR"
+  chmod 700 "$XDG_RUNTIME_DIR"
+  export XDG_RUNTIME_DIR
+fi
+
 CN="${1:-$HOME/.cache/dxdiary-target/debug/dxdiary}"
 
 pass=0

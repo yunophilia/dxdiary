@@ -29,7 +29,9 @@ for the plan and [spikes/FINDINGS.md](spikes/FINDINGS.md) for what the spikes se
 ```
 
 ```bash
-cargo run -- /path/to/repo
+dxdiary /path/to/repo      # a directory opens as the tree
+dxdiary src/main.rs        # a file opens its repository, with that file showing
+dxdiary                    # the current directory
 ```
 
 | | |
@@ -153,6 +155,15 @@ where colours will look wrong.
 
 Verified against a real WezTerm by [spikes/05-wezterm-harness](spikes/05-wezterm-harness/),
 an automated harness driving `wezterm-mux-server` headlessly under both bash and zsh.
+
+Two scripts live there. `run.sh` checks capability detection; `smoke.sh` drives the
+editor itself — opens a file, searches it, steps the matches, goes to a line, cycles
+the baseline, and checks the terminal is restored on quit:
+
+```bash
+./spikes/05-wezterm-harness/run.sh ~/.local/bin/dxdiary
+./spikes/05-wezterm-harness/smoke.sh ~/.local/bin/dxdiary ~/dxdiary
+```
 
 ---
 

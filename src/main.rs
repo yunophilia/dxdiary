@@ -3,7 +3,7 @@
 //! Phase 1: file tree, content pane, mouse routing. Git, syntax, and LSP land
 //! in later phases; see DESIGN.md.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
@@ -17,7 +17,8 @@ USAGE:
     dxdiary [PATH]
 
 ARGS:
-    PATH    Directory to open. Defaults to the current directory.
+    PATH    File or directory to open. A file opens its repository with that
+            file showing. Defaults to the current directory.
 
 OPTIONS:
     -h, --help       Print this help
@@ -138,16 +139,36 @@ fn run() -> Result<()> {
     // directory: a plugin pane inherits herdr's cwd, not the crewmate's, so
     // trusting cwd would show the wrong tree entirely.
     let herdr = dxdiary_herdr::Context::from_env();
-    let root = root
+    let requested = root
         .map(PathBuf::from)
         .unwrap_or_else(|| herdr.root_or(PathBuf::from(".")));
-    let root = root
+    let requested = requested
         .canonicalize()
-        .with_context(|| format!("cannot open {}", root.display()))?;
+        .with_context(|| format!("cannot open {}", requested.display()))?;
 
-    if !root.is_dir() {
-        anyhow::bail!("{} is not a directory", root.display());
-    }
+    // A file argument opens its *repository*, with that file showing. Every
+    // other editor takes a path to a file, and requiring a directory meant
+    // `dxdiary foo.rs` failed outright and you had to open the repo and
+    // navigate to it.
+    let (root, open_file) = if requested.is_dir() {
+        (requested, None)
+    } else {
+        let parent = requested
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        // Walk up to the worktree root so the tree is the project, not one
+        // directory of it. Outside a repository the file's own directory is
+        // as much context as there is.
+        let root = match dxdiary_vcs::GitRepo::open(&parent) {
+            Ok(repo) => repo
+                .workdir()
+                .and_then(|w| w.canonicalize().ok())
+                .unwrap_or_else(|| parent.clone()),
+            Err(_) => parent.clone(),
+        };
+        (root, Some(requested))
+    };
 
     let (config, warning) = Config::load();
 
@@ -176,6 +197,13 @@ fn run() -> Result<()> {
         app.status = format!("{label} · {}", app.status);
     }
 
+    // After the restored state, so a file named on the command line wins over
+    // the one this worktree was left on.
+    if let Some(file) = open_file {
+        app.reveal_and_open(file);
+    }
+
+    // Last, because a broken config is the most important thing on screen.
     if let Some(w) = warning {
         app.status = format!("config: {w}");
     }
