@@ -30,6 +30,18 @@ for f in "$WEZTERM" "$MUX" "$DX"; do
   [ -x "$f" ] || { echo "missing: $f" >&2; exit 1; }
 done
 
+# Its own mux config, rather than relying on run.sh having been run first:
+# the two scripts are independent entry points and an order dependency between
+# them is invisible until someone runs this one alone.
+mkdir -p "$HOME/.config/wezterm"
+cat > "$HOME/.config/wezterm/wezterm.lua" <<'LUA'
+return {
+  unix_domains = { { name = 'default' } },
+  default_prog = { '/bin/bash', '--norc', '--noprofile' },
+  check_for_updates = false,
+}
+LUA
+
 pkill -f wezterm-mux-server 2>/dev/null
 "$MUX" --daemonize >/dev/null 2>&1
 sleep 2
