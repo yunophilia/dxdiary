@@ -41,6 +41,8 @@ dxdiary                    # the current directory
 | `shift`+`←`/`→` | pan a long line without walking the cursor along it |
 | `enter` / `space` | open file, or fold directory |
 | click | same — fold a directory, open a file |
+| drag the divider | resize the panes |
+| `<` / `>` | same, from the keyboard |
 | scroll wheel | scrolls whatever is under the pointer |
 | `tab` | switch pane |
 | `g` / `G` | top / bottom |

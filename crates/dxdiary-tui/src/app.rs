@@ -165,6 +165,21 @@ pub struct App {
     /// Where the tree cursor was before the results took the pane over.
     tree_sel_saved: usize,
 
+    // --- the split ------------------------------------------------------
+    /// Width of the left pane, as a percentage of the body.
+    ///
+    /// Starts from the config and is what dragging the divider changes, so a
+    /// drag does not quietly rewrite the config file.
+    tree_percent: u16,
+    /// True once the width was set by hand, which stops anything else moving
+    /// it -- a divider that springs back is worse than one that does not move.
+    width_pinned: bool,
+    /// A divider drag is in progress.
+    dragging: bool,
+    /// Width of the whole body as of the last frame, so a drag can turn a
+    /// column into a percentage. Only render knows it.
+    body_w: u16,
+
     // --- syntax ---------------------------------------------------------
     highlighter: dxdiary_syntax::Highlighter,
     /// Detected language of the open file, if it is one dxdiary knows.
@@ -207,6 +222,7 @@ pub struct App {
 
 impl App {
     pub fn new(root: PathBuf, config: Config, depth: ColorDepth) -> Self {
+        let tree_percent = config.tree_width_percent();
         let tree = FileTree::new(root);
         let mut app = Self {
             config,
@@ -238,6 +254,10 @@ impl App {
             grep: None,
             grep_rx: None,
             tree_sel_saved: 0,
+            tree_percent,
+            width_pinned: false,
+            dragging: false,
+            body_w: 0,
             highlighter: dxdiary_syntax::Highlighter::new(),
             language: None,
             doc_spans: Vec::new(),
@@ -600,6 +620,8 @@ impl App {
             }
             KeyCode::Char('/') => self.begin_prompt(Asking::Search),
             KeyCode::Char('*') => self.begin_prompt(Asking::Grep),
+            KeyCode::Char('<') => self.nudge_split(-5),
+            KeyCode::Char('>') => self.nudge_split(5),
             KeyCode::Char(':') => self.begin_prompt(Asking::Goto),
             KeyCode::Char('n') => self.step_search(true),
             KeyCode::Char('N') => self.step_search(false),
@@ -717,6 +739,17 @@ impl App {
     fn on_mouse(&mut self, m: MouseEvent) -> bool {
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => self.on_click(m.column, m.row),
+            // Only follow a drag that started on the divider. Dragging across
+            // a pane body is a text selection as far as the user is
+            // concerned, and must not shove the layout around.
+            MouseEventKind::Drag(MouseButton::Left) if self.dragging => {
+                self.set_split(m.column, self.body_w)
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let was = self.dragging;
+                self.dragging = false;
+                was
+            }
             MouseEventKind::ScrollDown => self.scroll_at(m.column, m.row, 3),
             MouseEventKind::ScrollUp => self.scroll_at(m.column, m.row, -3),
             _ => false,
@@ -733,7 +766,13 @@ impl App {
                 self.focus = pane;
                 true
             }
-            HitTarget::Divider => false,
+            HitTarget::Divider => {
+                // Grab it. The move itself arrives as Drag events; a plain
+                // click on the seam should not jump the split to the cursor,
+                // because the cursor is already there.
+                self.dragging = true;
+                false
+            }
             HitTarget::TreeBody if self.grep.is_some() => {
                 let index = self.tree_scroll + hit.local_row as usize;
                 if index >= self.tree_rows() {
@@ -2018,6 +2057,57 @@ impl App {
         }
     }
 
+    /// Width of the left pane right now, as a percentage.
+    ///
+    /// Search results need more room than a file tree -- a line of code plus
+    /// its location does not fit in a third of an 80-column terminal -- but
+    /// only until someone sets the width themselves. After that their number
+    /// stands, which is the whole point of being able to drag it.
+    fn split_percent(&self) -> u16 {
+        if self.grep.is_some() && !self.width_pinned {
+            self.tree_percent.max(55)
+        } else {
+            self.tree_percent
+        }
+    }
+
+    /// Move the split to put the divider at column `col`.
+    ///
+    /// Clamped the same way the config value is, so a drag cannot collapse
+    /// either pane to nothing and strand the thing inside it.
+    fn set_split(&mut self, col: u16, width: u16) -> bool {
+        if width == 0 {
+            return false;
+        }
+        let pct = ((col as u32 * 100) / width as u32) as u16;
+        let pct = pct.clamp(10, 80);
+        self.width_pinned = true;
+        if pct == self.tree_percent {
+            return false;
+        }
+        self.tree_percent = pct;
+        // The panes changed size, so anything clamped against them is stale.
+        self.clamp_tree();
+        self.clamp_content();
+        true
+    }
+
+    /// Nudge the split from the keyboard (`<` and `>`).
+    ///
+    /// The mouse is an enhancement here as everywhere else: an SSH hop into a
+    /// terminal that does not report drags must still be able to move this.
+    fn nudge_split(&mut self, delta: i16) -> bool {
+        let next = (self.tree_percent as i16 + delta).clamp(10, 80) as u16;
+        self.width_pinned = true;
+        if next == self.tree_percent {
+            return false;
+        }
+        self.tree_percent = next;
+        self.clamp_tree();
+        self.clamp_content();
+        true
+    }
+
     /// Rows the tree pane can scroll through, whichever mode it is in.
     pub fn tree_rows(&self) -> usize {
         match &self.grep {
@@ -2074,13 +2164,18 @@ impl App {
         // Search results need more room than a file tree: a line of code plus
         // its location does not fit in a third of an 80-column terminal, and
         // the code is the half you actually read.
-        let left = if self.grep.is_some() {
-            self.config.tree_width_percent().max(55)
-        } else {
-            self.config.tree_width_percent()
-        };
+        let left = self.split_percent();
         let [tree_area, content_area] =
             Layout::horizontal([Constraint::Percentage(left), Constraint::Min(10)]).areas(body);
+
+        // The seam between the two panes: their touching borders. Pushed last
+        // of the three regions so it wins over the pane bodies underneath.
+        let divider = Rect::new(
+            content_area.x.saturating_sub(1),
+            body.y,
+            2.min(area.width.saturating_sub(content_area.x.saturating_sub(1))),
+            body.height,
+        );
 
         // Apply sizes *before* drawing, not after. Layout already knows them,
         // and scroll clamping needs real numbers — running it against the
@@ -2089,9 +2184,13 @@ impl App {
         self.tree_h = inner_height(tree_area);
         self.content_h = inner_height(content_area);
         self.content_w = content_area.width.saturating_sub(2) as usize;
+        // Only render knows the body's width, and a drag needs it to turn a
+        // column into a percentage.
+        self.body_w = body.width;
         self.clamp_tree();
         self.clamp_content();
 
+        hits.push(divider, HitTarget::Divider);
         panes::render_tree(f, tree_area, self, &mut hits);
         panes::render_content(f, content_area, self, &mut hits);
         panes::render_status(f, status, self);

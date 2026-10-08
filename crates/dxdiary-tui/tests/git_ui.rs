@@ -2066,3 +2066,186 @@ fn opening_a_result_is_refused_rather_than_losing_unsaved_edits() {
     assert!(app.is_dirty(), "the edit survived");
     assert!(app.status.contains("unsaved"), "{}", app.status);
 }
+
+// ----------------------------------------------------------- the divider
+
+/// Column the pane seam sits at, read off a rendered frame.
+///
+/// Found rather than computed, so the test checks where the divider actually
+/// is rather than agreeing with the layout code about where it should be.
+fn seam_column(app: &mut App, width: u16) -> u16 {
+    let mut term = Terminal::new(TestBackend::new(width, 16)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    let buf = term.backend().buffer();
+    // Row 1 is inside both panes' bodies; the seam is the two border columns.
+    for x in 1..width - 1 {
+        if buf[(x, 1)].symbol() == "│" {
+            return x + 1;
+        }
+    }
+    panic!("no seam found");
+}
+
+fn drag(app: &mut App, kind: MouseEventKind, col: u16, row: u16) -> bool {
+    app.handle(Event::Mouse(MouseEvent {
+        kind,
+        column: col,
+        row,
+        modifiers: KeyModifiers::NONE,
+    }))
+}
+
+#[test]
+fn the_divider_can_be_dragged_to_a_new_width() {
+    let mut app = find_app("drag", "fn main() {}\n");
+    let before = seam_column(&mut app, 100);
+    assert!(
+        (28..=32).contains(&before),
+        "default split at ~30%: {before}"
+    );
+
+    // Grab the seam, move right, let go.
+    assert!(!drag(
+        &mut app,
+        MouseEventKind::Down(MouseButton::Left),
+        before - 1,
+        1
+    ));
+    drag(&mut app, MouseEventKind::Drag(MouseButton::Left), 60, 1);
+    drag(&mut app, MouseEventKind::Up(MouseButton::Left), 60, 1);
+
+    let after = seam_column(&mut app, 100);
+    assert!(
+        (58..=62).contains(&after),
+        "the divider followed the mouse: {before} -> {after}"
+    );
+}
+
+#[test]
+fn a_drag_that_did_not_start_on_the_divider_is_ignored() {
+    // Dragging across a pane is a text selection as far as the user is
+    // concerned; it must not shove the layout around.
+    let mut app = find_app("drag-elsewhere", "fn main() {}\n");
+    let before = seam_column(&mut app, 100);
+
+    drag(&mut app, MouseEventKind::Down(MouseButton::Left), 5, 2);
+    drag(&mut app, MouseEventKind::Drag(MouseButton::Left), 70, 2);
+    drag(&mut app, MouseEventKind::Up(MouseButton::Left), 70, 2);
+
+    assert_eq!(seam_column(&mut app, 100), before, "the split held still");
+}
+
+#[test]
+fn a_drag_stops_when_the_button_is_released() {
+    let mut app = find_app("drag-release", "fn main() {}\n");
+    let seam = seam_column(&mut app, 100);
+
+    drag(
+        &mut app,
+        MouseEventKind::Down(MouseButton::Left),
+        seam - 1,
+        1,
+    );
+    drag(&mut app, MouseEventKind::Drag(MouseButton::Left), 50, 1);
+    drag(&mut app, MouseEventKind::Up(MouseButton::Left), 50, 1);
+    let settled = seam_column(&mut app, 100);
+
+    // Further motion with no button held must not keep resizing.
+    drag(&mut app, MouseEventKind::Drag(MouseButton::Left), 20, 1);
+    assert_eq!(seam_column(&mut app, 100), settled, "the drag had ended");
+}
+
+#[test]
+fn neither_pane_can_be_dragged_away_to_nothing() {
+    let mut app = find_app("drag-clamp", "fn main() {}\n");
+    let seam = seam_column(&mut app, 100);
+    drag(
+        &mut app,
+        MouseEventKind::Down(MouseButton::Left),
+        seam - 1,
+        1,
+    );
+
+    drag(&mut app, MouseEventKind::Drag(MouseButton::Left), 0, 1);
+    let far_left = seam_column(&mut app, 100);
+    assert!(far_left >= 10, "the tree keeps a usable width: {far_left}");
+
+    drag(&mut app, MouseEventKind::Drag(MouseButton::Left), 99, 1);
+    let far_right = seam_column(&mut app, 100);
+    assert!(far_right <= 81, "the content pane survives: {far_right}");
+}
+
+#[test]
+fn angle_brackets_move_the_split_from_the_keyboard() {
+    // The mouse is an enhancement everywhere else here, and so it is here:
+    // an SSH hop into a terminal that does not report drags must still work.
+    let mut app = find_app("nudge", "fn main() {}\n");
+    let before = seam_column(&mut app, 100);
+
+    key(&mut app, KeyCode::Char('>'));
+    let wider = seam_column(&mut app, 100);
+    assert!(wider > before, "{before} -> {wider}");
+
+    key(&mut app, KeyCode::Char('<'));
+    assert_eq!(seam_column(&mut app, 100), before, "and back again");
+}
+
+#[test]
+fn nudging_stops_at_the_same_limits_as_dragging() {
+    let mut app = find_app("nudge-clamp", "fn main() {}\n");
+    for _ in 0..40 {
+        key(&mut app, KeyCode::Char('>'));
+    }
+    assert!(seam_column(&mut app, 100) <= 81);
+    for _ in 0..40 {
+        key(&mut app, KeyCode::Char('<'));
+    }
+    assert!(seam_column(&mut app, 100) >= 10);
+}
+
+#[test]
+fn results_widen_the_pane_only_until_the_width_is_set_by_hand() {
+    // The widening is a default, not a rule. A divider that springs back
+    // after you move it is worse than one that does not move at all.
+    let mut app = grep_app("width-pin");
+    let normal = seam_column(&mut app, 100);
+
+    grep_for(&mut app, "needle");
+    let widened = seam_column(&mut app, 100);
+    assert!(
+        widened > normal,
+        "results got more room: {normal} -> {widened}"
+    );
+
+    key(&mut app, KeyCode::Char('<'));
+    let chosen = seam_column(&mut app, 100);
+    assert!(chosen < widened, "the nudge took effect while results show");
+
+    key(&mut app, KeyCode::Esc);
+    assert!(app.grep.is_none());
+    assert_eq!(
+        seam_column(&mut app, 100),
+        chosen,
+        "closing the results left the width where it was put"
+    );
+}
+
+#[test]
+fn resizing_keeps_the_cursor_on_screen() {
+    // Both panes clamp their scroll against their own size, so a resize that
+    // did not re-clamp could leave the cursor off the bottom.
+    let mut app = find_app("resize-clamp", &"x\n".repeat(200));
+    key(&mut app, KeyCode::Tab);
+    let _ = draw(&mut app);
+    key(&mut app, KeyCode::Char('G'));
+    let _ = draw(&mut app);
+
+    for _ in 0..6 {
+        key(&mut app, KeyCode::Char('>'));
+    }
+    let shown = draw(&mut app);
+    assert!(
+        shown.contains(&format!("{}", app.doc_line + 1)),
+        "the cursor line is still rendered after the resize"
+    );
+}

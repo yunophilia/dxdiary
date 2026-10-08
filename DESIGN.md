@@ -622,6 +622,36 @@ true and noted since phase 2.
 Capped at 500 hits, and the report says when it stopped early. A one-character query
 over a large tree would otherwise fill memory with a list nobody will scroll.
 
+### Phase 11 — a divider you can move — **done**
+
+`HitTarget::Divider` was declared in phase 1 with the comment "the draggable divider
+between panes" and then never pushed by the renderer or handled by the click path. It
+sat as a stub through ten phases, and the split stayed whatever `tree_width_percent`
+said. Dragging it did nothing, silently, which is the worst way for a control to not
+exist -- it looks like a control.
+
+Now the seam is a hit region, a press on it arms a drag, and motion moves the split.
+Only a drag that *started* on the divider is followed: dragging across a pane body is a
+text selection as far as the user is concerned and must not shove the layout around.
+Both panes clamp to 10-80% so neither can be dragged away to nothing, stranding
+whatever was inside it.
+
+`<` and `>` do the same from the keyboard. The mouse is an enhancement here as
+everywhere else -- an SSH hop into a terminal that reports no drags still has to be able
+to move this.
+
+The runtime width lives in `App`, not in `Config`: dragging a divider should not
+silently rewrite a config file on disk.
+
+Phase 10's "widen the pane for search results" became a default rather than a rule. Once
+the width has been set by hand it stands, because a divider that springs back after you
+move it is worse than one that does not move at all.
+
+Verified by injecting raw SGR mouse reports into a real WezTerm -- press, motion with
+the button held, release -- which is the only way to find out whether a drag survives
+the terminal, the mouse protocol and crossterm. The same technique spike 0.2 used for
+clicks.
+
 ## 9. Risks
 
 | Risk | Severity | Status |

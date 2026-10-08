@@ -162,6 +162,60 @@ check    "the results list the matching code"           "fn alpha"
 keys $'\e'
 check    "esc gives the tree back"                      "results closed"
 
+# --- the divider ----------------------------------------------------------
+# Raw SGR mouse reports, the same encoding spike 0.2 used to prove clicks
+# survive herdr and SSH. This is the only way to learn whether a *drag*
+# survives the whole chain -- terminal, mouse protocol, crossterm -- which no
+# unit test can answer.
+#
+#   CSI < Cb ; Cx ; Cy M   press, Cb 0 = left button
+#   CSI < 32 ; Cx ; Cy M   motion while the button is held
+#   CSI < Cb ; Cx ; Cy m   release
+#
+# Columns and rows are 1-based in the protocol.
+ESC=$(printf '')
+mouse() {
+  "$WEZTERM" cli send-text --pane-id "$PANE" --no-paste "${ESC}[<$1;$2;$3$4"
+  sleep 0.3
+}
+
+# Where the two panes meet on the title row. Only its movement matters, so a
+# byte offset is as good as a column and needs no multibyte arithmetic.
+seam() { screen | sed -n '1p' | grep -bo '┐┌' | head -1 | cut -d: -f1; }
+
+before_seam=$(seam)
+if [ -z "$before_seam" ]; then
+  bad "the pane seam is on screen"
+  dump "$(screen)"
+else
+  ok "the pane seam is on screen"
+  mouse 0 25 2 M       # grab near the default 30% split
+  mouse 32 50 2 M      # drag right
+  mouse 0 50 2 m       # release
+  after_seam=$(seam)
+  if [ -n "$after_seam" ] && [ "$after_seam" -gt "$before_seam" ]; then
+    ok "dragging the divider resizes the panes"
+  else
+    bad "dragging the divider resizes the panes"
+    printf '       seam %s -> %s
+' "$before_seam" "${after_seam:-none}"
+    dump "$(screen)"
+  fi
+
+  # The keyboard must be able to do it too, for a terminal that reports no
+  # drags at all.
+  wide=$(seam)
+  keys "<"
+  narrow=$(seam)
+  if [ -n "$narrow" ] && [ "$narrow" -lt "$wide" ]; then
+    ok "< narrows the split from the keyboard"
+  else
+    bad "< narrows the split from the keyboard"
+    printf '       seam %s -> %s
+' "$wide" "${narrow:-none}"
+  fi
+fi
+
 # --- git ------------------------------------------------------------------
 keys "b"
 check    "b cycles the diff baseline"                   "staged"
