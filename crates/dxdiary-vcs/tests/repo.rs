@@ -496,3 +496,195 @@ fn blame_runs_off_thread_and_delivers_over_a_channel() {
         .expect("blame succeeded");
     assert!(!blame.is_empty());
 }
+
+// ------------------------------------------------------------- gitignore
+
+/// A repo whose .gitignore covers a build directory, one file, and a pattern.
+fn ignore_fixture(tag: &str) -> PathBuf {
+    let root = repo(tag);
+    write(
+        &root,
+        ".gitignore",
+        "build/\n*.log\nsecret.txt\n!keep.log\n",
+    );
+    write(&root, "build/out.bin", "x\n");
+    write(&root, "build/nested/deep.bin", "x\n");
+    write(&root, "run.log", "x\n");
+    write(&root, "keep.log", "x\n");
+    write(&root, "secret.txt", "x\n");
+    // Only the rules and the negated file are tracked; the rest stay on disk
+    // as the ignored files the matcher is being asked about.
+    git(&root, &["add", ".gitignore", "keep.log"]);
+    git(&root, &["commit", "--quiet", "-m", "ignore rules"]);
+    root
+}
+
+fn ignored_names(repo: &GitRepo, root: &std::path::Path, entries: &[(&str, bool)]) -> Vec<String> {
+    let paths: Vec<(PathBuf, bool)> = entries.iter().map(|(n, d)| (root.join(n), *d)).collect();
+    let set = repo.ignored(&paths);
+    let mut names: Vec<String> = entries
+        .iter()
+        .filter(|(n, _)| set.contains(&root.join(n)))
+        .map(|(n, _)| (*n).to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_directory_pattern_matches_the_directory() {
+    let root = ignore_fixture("ign-dir");
+    let repo = GitRepo::open(&root).unwrap();
+    assert_eq!(
+        ignored_names(&repo, &root, &[("build", true), ("src", true)]),
+        vec!["build"]
+    );
+}
+
+#[test]
+fn a_directory_pattern_does_not_match_a_file_of_the_same_name() {
+    // `build/` is directory-only, which is why the flag has to be passed
+    // through rather than guessed.
+    let root = ignore_fixture("ign-dirflag");
+    let repo = GitRepo::open(&root).unwrap();
+    assert!(ignored_names(&repo, &root, &[("build", false)]).is_empty());
+}
+
+#[test]
+fn everything_under_an_ignored_directory_is_ignored_too() {
+    let root = ignore_fixture("ign-nested");
+    let repo = GitRepo::open(&root).unwrap();
+    assert_eq!(
+        ignored_names(
+            &repo,
+            &root,
+            &[("build/out.bin", false), ("build/nested", true)]
+        ),
+        vec!["build/nested", "build/out.bin"]
+    );
+}
+
+#[test]
+fn a_glob_and_a_literal_name_both_match() {
+    let root = ignore_fixture("ign-glob");
+    let repo = GitRepo::open(&root).unwrap();
+    assert_eq!(
+        ignored_names(
+            &repo,
+            &root,
+            &[
+                ("run.log", false),
+                ("secret.txt", false),
+                ("src/main.rs", false)
+            ]
+        ),
+        vec!["run.log", "secret.txt"]
+    );
+}
+
+#[test]
+fn a_negated_pattern_un_ignores_its_match() {
+    // `!keep.log` after `*.log`. Hand-rolling gitignore gets this wrong; git
+    // answering for itself cannot.
+    let root = ignore_fixture("ign-negate");
+    let repo = GitRepo::open(&root).unwrap();
+    assert!(ignored_names(&repo, &root, &[("keep.log", false)]).is_empty());
+}
+
+#[test]
+fn a_tracked_file_is_never_reported_as_ignored() {
+    let root = ignore_fixture("ign-tracked");
+    let repo = GitRepo::open(&root).unwrap();
+    assert!(ignored_names(
+        &repo,
+        &root,
+        &[("src/main.rs", false), (".gitignore", false)]
+    )
+    .is_empty());
+}
+
+#[test]
+fn asking_about_nothing_answers_nothing() {
+    let root = ignore_fixture("ign-empty");
+    let repo = GitRepo::open(&root).unwrap();
+    assert!(repo.ignored(&[]).is_empty());
+}
+
+#[test]
+fn a_repository_with_no_commits_still_reads_its_gitignore() {
+    // There is no index yet, which the implementation must not treat as an
+    // error -- .gitignore applies from the first file you create.
+    let root = std::env::temp_dir().join("dxdiary-vcs-ign-fresh");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    git(&root, &["init", "--quiet"]);
+    write(&root, ".gitignore", "junk/\n");
+    write(&root, "junk/a.txt", "x\n");
+
+    let repo = GitRepo::open(&root).unwrap();
+    assert_eq!(ignored_names(&repo, &root, &[("junk", true)]), vec!["junk"]);
+}
+
+#[test]
+fn a_repo_wide_search_skips_what_git_ignores() {
+    // The tree now *shows* ignored files, greyed; search still skips them,
+    // which is what VS Code does and what you want when the ignored directory
+    // is a hundred thousand build artefacts.
+    let root = ignore_fixture("grep-ign");
+    std::fs::write(root.join("src").join("hit.rs"), "needle\n").unwrap();
+    std::fs::write(root.join("build").join("hit.rs"), "needle\n").unwrap();
+    std::fs::write(root.join("noisy.log"), "needle\n").unwrap();
+
+    let rx = dxdiary_vcs::grep::spawn(root.clone(), "needle".into(), 1024 * 1024);
+    let report = rx
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the worker reported");
+
+    let hits: Vec<String> = report
+        .hits
+        .iter()
+        .map(|h| {
+            h.path
+                .strip_prefix(&root)
+                .unwrap_or(&h.path)
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect();
+    assert_eq!(hits, vec!["src/hit.rs"], "ignored matches were skipped");
+}
+
+#[test]
+fn a_search_outside_a_repository_still_works() {
+    // No repository to ask, so the model's own fallback decides.
+    let root = std::env::temp_dir().join("dxdiary-vcs-grep-norepo");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("a.txt"), "needle\n").unwrap();
+
+    let rx = dxdiary_vcs::grep::spawn(root.clone(), "needle".into(), 1024 * 1024);
+    let report = rx
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the worker reported");
+    assert_eq!(report.len(), 1);
+}
+
+#[test]
+fn a_negated_rule_is_searched_after_all() {
+    // `!keep.log` after `*.log`. The predicate believes git, so a file git
+    // would track is a file search can find.
+    let root = ignore_fixture("grep-negate");
+    std::fs::write(root.join("keep.log"), "needle\n").unwrap();
+    std::fs::write(root.join("drop.log"), "needle\n").unwrap();
+
+    let rx = dxdiary_vcs::grep::spawn(root.clone(), "needle".into(), 1024 * 1024);
+    let report = rx
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the worker reported");
+    let names: Vec<String> = report
+        .hits
+        .iter()
+        .map(|h| h.path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, vec!["keep.log"]);
+}

@@ -7,6 +7,7 @@
 pub mod blame;
 pub mod diff;
 pub mod git;
+pub mod grep;
 pub mod types;
 
 pub use blame::{Blame, BlameLine};

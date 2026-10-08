@@ -5,6 +5,9 @@ edition = "2021"
 
 [dependencies]
 anyhow = { workspace = true }
+# The walk and the report live in the model layer; this crate only answers the
+# git questions it cannot. No cycle: core does not depend on vcs.
+dxdiary-core = { path = "../dxdiary-core" }
 # Pure Rust, and it already has blame and merge-base. Nothing outside this
 # crate imports gix -- see the Vcs trait.
 gix = { version = "0.86", features = ["blame", "status", "dirwalk", "revision"] }

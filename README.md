@@ -70,10 +70,11 @@ opens the file at that line and highlights the same query in it, so you see the 
 hits on the way past. The selected row's full path is in the status bar, since the rows
 show only a basename. `esc` gives the tree back.
 
-Skipped: `.git`, `target`, `node_modules`, `.venv`, `__pycache__` — the same list the
-tree hides, so a result can never point at a file you cannot otherwise reach. Binary
-files and anything over `max_file_bytes` are skipped too, and the list caps at 500 hits
-and says when it did.
+Skipped: anything `.gitignore` covers, plus `.git` itself. Outside a git repository
+there is nothing to ask, so a short name list (`target`, `node_modules`, `.venv`,
+`__pycache__`) stands in — walking a build directory of a hundred thousand files
+should not be the default. Binary files and anything over `max_file_bytes` are skipped
+too, and the list caps at 500 hits and says when it did.
 
 Editing:
 
@@ -133,6 +134,11 @@ status bar says when anything was hidden and why.
 
 Tree badges are git's own letters — `M`, `A`, `D`, `R`, `?` — and a `·` on a
 collapsed directory means something inside it changed.
+
+Files git would ignore are **shown, greyed out**, the way VS Code does it — you still
+need to see that `target/` is there. Only `.git` itself is hidden outright. Repo-wide
+search skips ignored files, which is also what VS Code does: the tree is for finding
+your way around, search is for finding code you wrote.
 
 **Fork point** is the one worth knowing: it answers "I branched from somewhere — what
 has this branch actually changed?" The base is resolved automatically, preferring the

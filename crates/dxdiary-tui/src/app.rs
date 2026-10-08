@@ -204,6 +204,8 @@ pub struct App {
     pub baseline: DiffBaseline,
     /// Path → status letter, for tree decoration.
     pub badges: BTreeMap<PathBuf, char>,
+    /// Tree rows git would ignore, recomputed with the visible set.
+    ignored: std::collections::HashSet<PathBuf>,
     /// Restrict the tree to changed files only (`c`).
     pub changed_only: bool,
     /// Indices into `tree.rows()` that are currently displayed. Selection is
@@ -274,6 +276,7 @@ impl App {
             fork: None,
             baseline: DiffBaseline::default(),
             badges: BTreeMap::new(),
+            ignored: std::collections::HashSet::new(),
             changed_only: false,
             visible: Vec::new(),
             hits: HitMap::new(),
@@ -301,6 +304,30 @@ impl App {
         }
     }
 
+    /// Ask git which tree rows it would ignore.
+    ///
+    /// Done for the whole row set in one call: the matcher is a stateful stack,
+    /// and rows only exist for directories that are actually expanded, so this
+    /// is bounded by what is on screen rather than by the size of the tree.
+    fn recompute_ignored(&mut self) {
+        let Some(vcs) = &self.vcs else {
+            self.ignored.clear();
+            return;
+        };
+        let paths: Vec<(PathBuf, bool)> = self
+            .tree
+            .rows()
+            .iter()
+            .map(|r| (r.path.clone(), r.is_dir))
+            .collect();
+        self.ignored = vcs.ignored(&paths);
+    }
+
+    /// Would git ignore this path? For the renderer.
+    pub fn is_ignored(&self, path: &std::path::Path) -> bool {
+        self.ignored.contains(path)
+    }
+
     /// Re-read status, badges, and the fork point.
     pub fn refresh_git(&mut self) {
         let Some(vcs) = &self.vcs else { return };
@@ -320,6 +347,7 @@ impl App {
 
     /// Rebuild the displayed row list for the current filter.
     fn recompute_visible(&mut self) {
+        self.recompute_ignored();
         let keep_all = !self.changed_only || self.badges.is_empty();
         let selected_path = self.selected_path();
 
@@ -1648,7 +1676,9 @@ impl App {
         }
         // Off the render thread: a walk of a large worktree takes long enough
         // to drop a frame, the same reason blame is threaded.
-        self.grep_rx = Some(dxdiary_core::grep::spawn(
+        // The vcs spawn skips what .gitignore skips; the core one falls back
+        // to a name list. Which you get depends on whether this is a repo.
+        self.grep_rx = Some(dxdiary_vcs::grep::spawn(
             self.tree.root.clone(),
             query.to_string(),
             self.config.max_file_bytes,

@@ -3,6 +3,7 @@
 //! The only module in the workspace that imports `gix`. Everything else goes
 //! through [`Vcs`], so gix's API churn stays contained here.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -57,6 +58,60 @@ impl GitRepo {
     fn diff_trees(&self, old: &gix::Tree<'_>, new: &gix::Tree<'_>) -> Result<Vec<FileChange>> {
         let changes = self.repo.diff_tree_to_tree(Some(old), Some(new), None)?;
         Ok(changes.iter().map(tree_change_to_file_change).collect())
+    }
+}
+
+/// A reusable `.gitignore` matcher.
+///
+/// Holding one across a walk matters: the matcher is a stack that descends and
+/// pops as it moves through directories, and rebuilding it per path would
+/// re-read every `.gitignore` on the way down for each question asked.
+pub struct Ignores<'repo> {
+    stack: gix::AttributeStack<'repo>,
+    root: PathBuf,
+}
+
+impl Ignores<'_> {
+    /// Would git ignore this path? `is_dir` matters, because a rule like
+    /// `target/` only matches a directory.
+    pub fn is_ignored(&mut self, path: &Path, is_dir: bool) -> bool {
+        let rela = match path.strip_prefix(&self.root) {
+            Ok(r) => r,
+            Err(_) => path,
+        };
+        if rela.as_os_str().is_empty() {
+            return false; // the worktree root itself
+        }
+        let mode = is_dir.then_some(gix::index::entry::Mode::DIR);
+        self.stack
+            .at_path(rela, mode)
+            .map(|p| p.is_excluded())
+            .unwrap_or(false)
+    }
+}
+
+impl GitRepo {
+    /// Build a matcher for this worktree, or `None` if git's ignore machinery
+    /// cannot be assembled -- in which case nothing is reported as ignored,
+    /// which is a cosmetic loss and no reason to refuse to draw a tree.
+    pub fn ignores(&self) -> Option<Ignores<'_>> {
+        // An index may not exist yet in a repository with no commits, and that
+        // is not an error -- .gitignore applies from the first file you make.
+        let index = self.repo.index_or_empty().ok()?;
+        // The stack copies what it needs out of the index, so the index does
+        // not have to outlive it.
+        let stack = self
+            .repo
+            .excludes(
+                &index,
+                None,
+                gix::worktree::stack::state::ignore::Source::WorktreeThenIdMappingIfNotSkipped,
+            )
+            .ok()?;
+        Some(Ignores {
+            stack,
+            root: self.workdir().unwrap_or(self.repo.git_dir()).to_path_buf(),
+        })
     }
 }
 
@@ -220,6 +275,22 @@ impl Vcs for GitRepo {
             &new_text,
             crate::diff::CONTEXT,
         ))
+    }
+
+    fn ignored(&self, paths: &[(PathBuf, bool)]) -> HashSet<PathBuf> {
+        let Some(mut matcher) = self.ignores() else {
+            return HashSet::new();
+        };
+        // Sorted, so the stack descends and pops once per directory instead of
+        // thrashing between unrelated branches of the tree.
+        let mut sorted: Vec<&(PathBuf, bool)> = paths.iter().collect();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+
+        sorted
+            .into_iter()
+            .filter(|(path, is_dir)| matcher.is_ignored(path, *is_dir))
+            .map(|(path, _)| path.clone())
+            .collect()
     }
 
     fn write_commit_graph(&self) -> Result<()> {

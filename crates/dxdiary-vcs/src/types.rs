@@ -202,6 +202,19 @@ pub trait Vcs: Send {
 
     /// Write a commit-graph. Cheap, and worth a lot — see [`RepoInfo`].
     fn write_commit_graph(&self) -> anyhow::Result<()>;
+
+    /// Which of these paths git would ignore.
+    ///
+    /// Batched, and takes the directory flag the caller already knows, because
+    /// the matcher is a stateful stack that walks down through directories:
+    /// asking it one path at a time in arbitrary order makes it rebuild that
+    /// stack for every question. A directory pattern like `target/` also only
+    /// matches when the matcher is told the path is a directory.
+    ///
+    /// Returns an empty set rather than an error when the ignore machinery
+    /// cannot be built: not knowing what is ignored is a cosmetic loss, and no
+    /// reason to refuse to draw a tree.
+    fn ignored(&self, paths: &[(PathBuf, bool)]) -> std::collections::HashSet<PathBuf>;
 }
 
 /// Trunk names tried in order when a branch has no upstream.

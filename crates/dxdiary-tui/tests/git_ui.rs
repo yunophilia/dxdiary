@@ -2249,3 +2249,149 @@ fn resizing_keeps_the_cursor_on_screen() {
         "the cursor line is still rendered after the resize"
     );
 }
+
+// --------------------------------------------------------- ignored files
+
+/// A repo that ignores a build directory and a log file.
+fn ignored_app(tag: &str) -> App {
+    let root = std::env::temp_dir().join(format!("dxdiary-ign-{tag}"));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    git(&root, &["init", "--quiet"]);
+    git(&root, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    pin_identity(&root);
+
+    write(&root, ".gitignore", "build/\n*.log\n");
+    write(&root, "src/main.rs", "fn main() {}\n");
+    write(&root, "build/out.bin", "x\n");
+    write(&root, "run.log", "x\n");
+    git(&root, &["add", ".gitignore", "src/main.rs"]);
+    git(&root, &["commit", "--quiet", "-m", "initial"]);
+
+    let mut app = App::new(root.clone(), Config::default(), ColorDepth::TrueColor);
+    app.attach_vcs(Box::new(GitRepo::open(&root).unwrap()));
+    app
+}
+
+/// Foreground colour of the first character of `needle` on its row.
+fn fg_of(app: &mut App, needle: &str) -> ratatui::style::Color {
+    let mut term = Terminal::new(TestBackend::new(90, 20)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    let buf = term.backend().buffer();
+    for y in 0..buf.area.height {
+        let text: String = (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol())
+            .collect::<Vec<_>>()
+            .join("");
+        if let Some(byte) = text.find(needle) {
+            let col = text[..byte].chars().count();
+            return buf[(col as u16, y)].fg;
+        }
+    }
+    panic!("no row containing {needle:?}");
+}
+
+#[test]
+fn an_ignored_directory_is_listed_rather_than_hidden() {
+    // It used to be hidden by a hardcoded name list, which was wrong twice
+    // over: it hid target/ in a repo that tracks it and showed build/ in one
+    // that does not.
+    let mut app = ignored_app("listed");
+    let screen = draw(&mut app);
+    assert!(
+        screen.contains("build"),
+        "the ignored directory is there:\n{screen}"
+    );
+    assert!(
+        screen.contains("run.log"),
+        "and the ignored file:\n{screen}"
+    );
+}
+
+#[test]
+fn ignored_entries_are_greyed_out() {
+    let mut app = ignored_app("greyed");
+    let ignored_dir = fg_of(&mut app, "build");
+    let ignored_file = fg_of(&mut app, "run.log");
+    let normal_dir = fg_of(&mut app, "src");
+    let normal_file = fg_of(&mut app, ".gitignore");
+
+    assert_ne!(
+        ignored_dir, normal_dir,
+        "an ignored directory reads differently"
+    );
+    assert_ne!(ignored_file, normal_file, "so does an ignored file");
+    assert_eq!(
+        ignored_dir, ignored_file,
+        "and both use the one ignored colour"
+    );
+}
+
+#[test]
+fn everything_inside_an_ignored_directory_is_greyed_too() {
+    let mut app = ignored_app("nested");
+    // Expand build/ so its contents become rows.
+    while app.selected_path().map(|p| p.ends_with("build")) != Some(true) {
+        assert!(
+            key(&mut app, KeyCode::Down),
+            "ran off the tree looking for build"
+        );
+    }
+    key(&mut app, KeyCode::Enter);
+
+    let screen = draw(&mut app);
+    assert!(screen.contains("out.bin"), "expanded:\n{screen}");
+    assert_eq!(
+        fg_of(&mut app, "out.bin"),
+        fg_of(&mut app, "build"),
+        "git ignores everything under an ignored directory, and so does the view"
+    );
+}
+
+#[test]
+fn git_internals_stay_hidden() {
+    // .git is not ignored by .gitignore -- it is simply never interesting,
+    // which is why it is the one name still hidden outright.
+    let mut app = ignored_app("dotgit");
+    let screen = draw(&mut app);
+    assert!(!screen.contains(".git "), "no .git row:\n{screen}");
+    assert!(
+        screen.contains(".gitignore"),
+        "but .gitignore is a real file"
+    );
+}
+
+#[test]
+fn outside_a_repository_nothing_is_greyed() {
+    // Nothing to ask, so everything renders as ordinary.
+    let root = std::env::temp_dir().join("dxdiary-ign-norepo");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    write(&root, ".gitignore", "build/\n");
+    write(&root, "build/out.bin", "x\n");
+    write(&root, "keep.rs", "fn main() {}\n");
+
+    let mut app = App::new(root.clone(), Config::default(), ColorDepth::TrueColor);
+    assert!(!app.is_ignored(&root.join("build")));
+    let screen = draw(&mut app);
+    assert!(screen.contains("build"), "still listed:\n{screen}");
+}
+
+#[test]
+fn a_negated_rule_is_not_greyed() {
+    // The view believes git, so `!keep.log` after `*.log` comes out normal.
+    let root = std::env::temp_dir().join("dxdiary-ign-negate");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    git(&root, &["init", "--quiet"]);
+    pin_identity(&root);
+    write(&root, ".gitignore", "*.log\n!keep.log\n");
+    write(&root, "drop.log", "x\n");
+    write(&root, "keep.log", "x\n");
+
+    let mut app = App::new(root.clone(), Config::default(), ColorDepth::TrueColor);
+    app.attach_vcs(Box::new(GitRepo::open(&root).unwrap()));
+    assert!(app.is_ignored(&root.join("drop.log")));
+    assert!(!app.is_ignored(&root.join("keep.log")));
+}

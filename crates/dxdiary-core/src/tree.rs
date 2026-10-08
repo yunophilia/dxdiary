@@ -11,9 +11,16 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-/// Directories never worth showing. Git-aware ignoring lands in Phase 2; this
-/// is only enough to keep the tree readable in the meantime.
-const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".venv", "__pycache__"];
+/// Directories never shown at all.
+///
+/// Only git's own bookkeeping. Build output and dependency directories used to
+/// be hidden here by name, which was wrong twice over: it hid `target/` in a
+/// repository that tracks it, and showed `build/` in one that does not. What a
+/// project ignores is a question only its `.gitignore` can answer, so the tree
+/// now shows everything and the view greys out whatever git would ignore --
+/// the same thing VS Code does, and for the same reason: you still need to see
+/// that the directory is there.
+const SKIP_DIRS: &[&str] = &[".git"];
 
 #[derive(Debug, Clone)]
 pub struct Row {
@@ -190,14 +197,28 @@ mod tests {
     }
 
     #[test]
-    fn hides_noise_directories_and_sorts_dirs_first() {
+    fn hides_git_internals_and_sorts_dirs_first() {
         let root = fixture("basic");
         let tree = FileTree::new(&root);
         let names: Vec<_> = tree.rows().iter().map(|r| r.name.as_str()).collect();
 
-        assert_eq!(names, vec!["src", "README.md"]);
-        assert!(!names.contains(&".git"));
-        assert!(!names.contains(&"target"));
+        assert_eq!(names, vec!["src", "target", "README.md"]);
+        assert!(
+            !names.contains(&".git"),
+            "git's own bookkeeping stays hidden"
+        );
+    }
+
+    #[test]
+    fn a_build_directory_is_listed_like_any_other() {
+        // It used to be hidden by name, which was wrong in both directions:
+        // it hid `target/` in a repository that tracks it, and left `build/`
+        // visible in one that ignores it. Whether something is ignored is a
+        // question for `.gitignore`, and the view greys the answer rather
+        // than hiding it -- you still need to see the directory is there.
+        let root = fixture("build-dir");
+        let tree = FileTree::new(&root);
+        assert!(tree.rows().iter().any(|r| r.name == "target"));
     }
 
     #[test]
@@ -214,11 +235,11 @@ mod tests {
 
         assert!(tree.toggle(0), "row 0 is the src directory");
         let names: Vec<_> = tree.rows().iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(names, vec!["src", "main.rs", "README.md"]);
+        assert_eq!(names, vec!["src", "main.rs", "target", "README.md"]);
         assert_eq!(tree.rows()[1].depth, 1);
 
         assert!(tree.toggle(0));
-        assert_eq!(tree.len(), 2);
+        assert_eq!(tree.len(), 3);
     }
 
     #[test]

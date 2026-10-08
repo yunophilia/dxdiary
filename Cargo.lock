@@ -532,6 +532,7 @@ name = "dxdiary-vcs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dxdiary-core",
  "gix",
 ]
 

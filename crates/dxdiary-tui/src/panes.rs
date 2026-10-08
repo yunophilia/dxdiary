@@ -41,6 +41,7 @@ struct Palette {
     syn_punctuation: Color,
     syn_variable: Color,
     syn_attribute: Color,
+    ignored: Color,
     match_bg: Color,
     match_current_bg: Color,
 }
@@ -73,6 +74,7 @@ impl Palette {
             syn_punctuation: theme.syn_punctuation.to_color(depth),
             syn_variable: theme.syn_variable.to_color(depth),
             syn_attribute: theme.syn_attribute.to_color(depth),
+            ignored: theme.ignored.to_color(depth),
             match_bg: theme.match_bg.to_color(depth),
             match_current_bg: theme.match_current_bg.to_color(depth),
         }
@@ -537,7 +539,13 @@ pub(crate) fn render_tree(f: &mut Frame, area: Rect, app: &App, hits: &mut HitMa
             }),
         );
 
-        let name_style = Style::default().fg(if row.is_dir { p.directory } else { p.fg });
+        let name_style = Style::default().fg(if app.is_ignored(&row.path) {
+            p.ignored
+        } else if row.is_dir {
+            p.directory
+        } else {
+            p.fg
+        });
         let mut spans = vec![
             badge_span,
             Span::styled(indent, Style::default()),

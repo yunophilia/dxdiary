@@ -16,12 +16,13 @@ use std::sync::mpsc::{self, Receiver};
 
 use crate::search::Search;
 
-/// Directories never worth searching.
+/// Directories skipped when nobody can say what the project ignores.
 ///
-/// Deliberately the same list `tree.rs` hides, so results cannot point at a
-/// file the tree refuses to show. `.gitignore` is still not consulted by
-/// either -- noted there since phase 2 and still true.
-const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".venv", "__pycache__"];
+/// Only used outside a git repository. Inside one, [`search_with`] is handed a
+/// predicate backed by `.gitignore`, which is the real answer; this list is a
+/// guess for the case where there is no repository to ask and walking a
+/// `target/` of a hundred thousand files would otherwise be the default.
+const FALLBACK_SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".venv", "__pycache__"];
 
 /// Stop after this many hits.
 ///
@@ -103,6 +104,27 @@ impl Report {
 /// grep that stalls on a vendored blob or prints a line of a `.so` is worse
 /// than one that admits it only reads source.
 pub fn search(root: &Path, query: &str, max_bytes: u64) -> Report {
+    search_with(root, query, max_bytes, &|path, is_dir| {
+        is_dir
+            && path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| FALLBACK_SKIP_DIRS.contains(&n))
+    })
+}
+
+/// Same, but `skip` decides what not to descend into or read.
+///
+/// The predicate is how `.gitignore` reaches a module that must not know what
+/// git is: `dxdiary-vcs` builds one from a real ignore matcher and passes it
+/// in. `.git` itself is always skipped regardless, since no `.gitignore` lists
+/// it and nobody wants to grep their object store.
+pub fn search_with(
+    root: &Path,
+    query: &str,
+    max_bytes: u64,
+    skip: &dyn Fn(&Path, bool) -> bool,
+) -> Report {
     let mut report = Report {
         query: query.to_string(),
         ..Default::default()
@@ -110,11 +132,17 @@ pub fn search(root: &Path, query: &str, max_bytes: u64) -> Report {
     if query.is_empty() {
         return report;
     }
-    walk(root, query, max_bytes, &mut report);
+    walk(root, query, max_bytes, skip, &mut report);
     report
 }
 
-fn walk(dir: &Path, query: &str, max_bytes: u64, report: &mut Report) {
+fn walk(
+    dir: &Path,
+    query: &str,
+    max_bytes: u64,
+    skip: &dyn Fn(&Path, bool) -> bool,
+    report: &mut Report,
+) {
     if report.hits.len() >= MAX_HITS {
         return;
     }
@@ -136,10 +164,17 @@ fn walk(dir: &Path, query: &str, max_bytes: u64, report: &mut Report) {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if path.is_dir() {
-            if !SKIP_DIRS.contains(&name) {
-                walk(&path, query, max_bytes, report);
-            }
+        let is_dir = path.is_dir();
+        // Never, whatever the predicate says: no .gitignore lists .git, and
+        // nobody wants to grep their own object store.
+        if is_dir && name == ".git" {
+            continue;
+        }
+        if skip(&path, is_dir) {
+            continue;
+        }
+        if is_dir {
+            walk(&path, query, max_bytes, skip, report);
         } else {
             search_file(&path, query, max_bytes, report);
         }
@@ -224,8 +259,8 @@ mod tests {
 
     #[test]
     fn build_output_and_git_internals_are_not_searched() {
-        // Results that point at a file the tree refuses to show would be a
-        // dead end, and .git is full of text that looks like source.
+        // Outside a repository there is nothing to ask, so the fallback list
+        // keeps a walk out of build output; .git is never searched at all.
         let root = fixture("skip");
         let r = search(&root, "alpha", BIG);
         assert!(

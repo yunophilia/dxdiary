@@ -652,6 +652,35 @@ the button held, release -- which is the only way to find out whether a drag sur
 the terminal, the mouse protocol and crossterm. The same technique spike 0.2 used for
 clicks.
 
+### Phase 12 — what git ignores — **done**
+
+The tree hid `target`, `node_modules`, `.venv` and `__pycache__` by name, with a
+comment promising git-aware ignoring "in Phase 2". Eleven phases later it still had
+not arrived, and the name list was wrong in both directions: it hid `target/` in a
+repository that tracks it, and showed `build/` in one that ignores it.
+
+`Vcs::ignored` now asks git. Batched, and taking the directory flag the caller already
+knows, because the matcher is a stateful stack that descends through directories:
+asking one path at a time in arbitrary order rebuilds that stack per question, and a
+rule like `target/` only matches when the matcher is told the path is a directory.
+
+The tree shows everything except `.git` and the view greys out what git would ignore,
+which is what VS Code does and for the same reason — you still need to see the
+directory is there. Only `.git` is hidden outright: no `.gitignore` lists it, and it
+is never interesting.
+
+Search went the other way, as it does in VS Code: it **skips** ignored files. The tree
+is for finding your way around; search is for finding code you wrote. That needed the
+walk, which lives in `dxdiary-core` and must not know what git is, to accept a skip
+predicate — `dxdiary-vcs::grep::spawn` builds one from a real matcher and hands it in.
+No cycle: core does not depend on vcs. Outside a repository the old name list survives
+as a fallback, because walking a hundred thousand build artefacts should not be the
+default when there is nobody to ask.
+
+Negation (`!keep.log` after `*.log`) is the case a hand-rolled gitignore always gets
+wrong, which is most of why this asks git rather than matching patterns itself. There
+is a test for it on both sides.
+
 ## 9. Risks
 
 | Risk | Severity | Status |
