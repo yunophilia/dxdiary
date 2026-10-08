@@ -80,7 +80,10 @@ Editing:
 
 | | |
 |---|---|
-| `i` | insert mode · `esc` leaves |
+| click the text | start editing there, caret where you clicked |
+| drag the text | select it |
+| `ctrl-c` | copy the selection — or quit, when nothing is selected |
+| `i` | insert mode from the keyboard · `esc` leaves |
 | `u` / `ctrl-r` | undo / redo |
 | `x` / `D` | delete character / line |
 | `ctrl-s` | save |
@@ -88,7 +91,17 @@ Editing:
 
 Undo groups by pause, so typing a word and undoing removes the word. `●` in the
 title means unsaved. Saving writes a temp file and renames, so an interrupted save
-cannot truncate your source.
+cannot truncate your source, and leaves you in the text rather than jumping to the
+diff.
+
+Clicking the text puts you in insert mode, which means the single-key commands
+(`d`, `b`, `/`, `q` …) are text until you press `esc`. The title and status line both
+say `INSERT` while that is true.
+
+Copy is OSC 52: dxdiary asks the *terminal* to set the clipboard, which is the only
+thing that works over SSH. Some terminals have clipboard writes disabled, which is why
+the status says it *sent* the bytes rather than claiming they arrived. Holding `shift`
+while dragging bypasses dxdiary entirely and gives you the terminal's own selection.
 
 Quitting or opening another file with unsaved edits refuses once and tells you; do
 it again to discard. `ctrl-c` skips the question.

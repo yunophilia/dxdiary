@@ -1,6 +1,7 @@
 //! Terminal UI for dxdiary.
 
 pub mod app;
+pub mod clipboard;
 pub mod panes;
 pub mod query;
 pub mod term;

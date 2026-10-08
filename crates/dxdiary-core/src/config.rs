@@ -110,6 +110,9 @@ pub struct Theme {
     pub syn_variable: Rgb,
     pub syn_attribute: Rgb,
     // --- search ---------------------------------------------------------
+    /// Behind text selected with the mouse. Stronger than `selection_bg`,
+    /// which only tints the row the cursor is on.
+    pub select_bg: Rgb,
     /// Names of files git would ignore. Shown, but visibly not part of the
     /// project -- dimmer than anything else in the tree.
     pub ignored: Rgb,
@@ -149,6 +152,7 @@ impl Default for Theme {
             syn_punctuation: Rgb(0x9a, 0xa5, 0xce),
             syn_variable: Rgb(0xc0, 0xca, 0xf5),
             syn_attribute: Rgb(0xe0, 0xaf, 0x68),
+            select_bg: Rgb(0x2d, 0x4f, 0x6b),
             ignored: Rgb(0x4a, 0x52, 0x63),
             match_bg: Rgb(0x3f, 0x37, 0x20),
             match_current_bg: Rgb(0x8f, 0x6a, 0x1e),

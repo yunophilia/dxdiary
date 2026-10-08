@@ -71,6 +71,26 @@ dump()   { printf '%s\n' "$1" | sed -n '1,8p' | sed 's/^/       | /'; }
 # decode as KeyCode::Enter.
 keys() { "$WEZTERM" cli send-text --pane-id "$PANE" --no-paste "$1"; sleep 0.2; }
 
+# Raw SGR mouse reports, the same encoding spike 0.2 used to prove clicks
+# survive herdr and SSH. This is the only way to learn whether a click or a
+# drag survives the whole chain -- terminal, mouse protocol, crossterm --
+# which no unit test can answer.
+#
+#   CSI < Cb ; Cx ; Cy M   press, Cb 0 = left button
+#   CSI < 32 ; Cx ; Cy M   motion while the button is held
+#   CSI < Cb ; Cx ; Cy m   release
+#
+# Columns and rows are 1-based in the protocol.
+ESC=$(printf '\033')
+mouse() {
+  "$WEZTERM" cli send-text --pane-id "$PANE" --no-paste "${ESC}[<$1;$2;$3$4"
+  sleep 0.3
+}
+
+# Where the two panes meet on the title row. Only its movement matters, so a
+# byte offset is as good as a column and needs no multibyte arithmetic.
+seam() { screen | sed -n '1p' | grep -bo '┐┌' | head -1 | cut -d: -f1; }
+
 # Poll the screen until a pattern appears, rather than sleeping a fixed amount
 # and hoping. Fixed sleeps are what made the first draft of this script flaky
 # on a slower machine -- the same lesson spike 0.5 already recorded once, and
@@ -162,27 +182,39 @@ check    "the results list the matching code"           "fn alpha"
 keys $'\e'
 check    "esc gives the tree back"                      "results closed"
 
+# --- click to edit --------------------------------------------------------
+# Column 35 row 2 is inside the first line of the file at the default split.
+# The assertions do not depend on hitting an exact character: what matters is
+# that a click in the text starts an edit and that the edit lands.
+mouse 0 35 2 M
+mouse 0 35 2 m
+check    "clicking the text starts editing"            "INSERT"
+keys "Z"
+check    "the unsaved marker appears"                  "●"
+# ctrl-s is 0x13. Raw mode turns off IXON, so it arrives as a keypress rather
+# than being eaten as flow control.
+keys "$(printf '\023')"
+check    "ctrl-s writes the file"                      "wrote"
+check_gone "and the unsaved marker clears"             "●"
+keys $'\e'
+
+# --- selecting by dragging ------------------------------------------------
+# The selection is a background colour, which get-text cannot see, so this
+# asserts on what the copy says instead -- which is the thing the selection
+# is for.
+mouse 0 33 2 M
+mouse 32 40 2 M
+mouse 0 40 2 m
+# ctrl-c, not y: the click above put us in insert mode, where y is text.
+# ctrl-c is handled before the mode split precisely so copy works in both.
+keys "$(printf '\003')"
+check    "dragging selects, and ctrl-c copies it"      "clipboard"
+# Back to normal mode: the click above left us editing, where the
+# single-key commands below would be typed as text.
+keys $'\e'
+check    "esc leaves the editor"                       "normal"
+
 # --- the divider ----------------------------------------------------------
-# Raw SGR mouse reports, the same encoding spike 0.2 used to prove clicks
-# survive herdr and SSH. This is the only way to learn whether a *drag*
-# survives the whole chain -- terminal, mouse protocol, crossterm -- which no
-# unit test can answer.
-#
-#   CSI < Cb ; Cx ; Cy M   press, Cb 0 = left button
-#   CSI < 32 ; Cx ; Cy M   motion while the button is held
-#   CSI < Cb ; Cx ; Cy m   release
-#
-# Columns and rows are 1-based in the protocol.
-ESC=$(printf '')
-mouse() {
-  "$WEZTERM" cli send-text --pane-id "$PANE" --no-paste "${ESC}[<$1;$2;$3$4"
-  sleep 0.3
-}
-
-# Where the two panes meet on the title row. Only its movement matters, so a
-# byte offset is as good as a column and needs no multibyte arithmetic.
-seam() { screen | sed -n '1p' | grep -bo '┐┌' | head -1 | cut -d: -f1; }
-
 before_seam=$(seam)
 if [ -z "$before_seam" ]; then
   bad "the pane seam is on screen"

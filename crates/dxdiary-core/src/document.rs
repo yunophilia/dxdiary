@@ -172,9 +172,78 @@ pub fn render_line_mapped(line: &str, tab_width: usize) -> (String, Vec<usize>) 
     (out, offsets)
 }
 
+/// Raw character index displayed at `column`.
+///
+/// The inverse of the map [`render_line_mapped`] returns, for turning a click
+/// into a cursor position. A column inside a tab's run of spaces resolves to
+/// the tab itself, which is the character actually there; a column past the
+/// end resolves to one past the last character, where a cursor legitimately
+/// sits.
+pub fn raw_column_at(offsets: &[usize], column: usize) -> usize {
+    // `offsets` is non-decreasing and ends with the line's total width, which
+    // is a sentinel rather than a character: a click inside the text must
+    // never resolve to it.
+    let last_char = offsets.len().saturating_sub(1);
+    if offsets.last().is_some_and(|&width| column >= width) {
+        return last_char;
+    }
+    for i in (0..last_char).rev() {
+        if offsets[i] <= column {
+            return i;
+        }
+    }
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_column_maps_back_to_the_character_shown_there() {
+        let (_, offsets) = render_line_mapped("abc", 4);
+        assert_eq!(raw_column_at(&offsets, 0), 0);
+        assert_eq!(raw_column_at(&offsets, 2), 2);
+    }
+
+    #[test]
+    fn a_column_inside_a_tab_resolves_to_the_tab() {
+        // "\tx" renders as four spaces then x. Clicking any of those spaces
+        // is a click on the tab, because that is the character there.
+        let (_, offsets) = render_line_mapped("\tx", 4);
+        for column in 0..4 {
+            assert_eq!(raw_column_at(&offsets, column), 0, "column {column}");
+        }
+        assert_eq!(raw_column_at(&offsets, 4), 1, "x itself");
+    }
+
+    #[test]
+    fn a_column_past_the_end_lands_one_past_the_last_character() {
+        let (_, offsets) = render_line_mapped("ab", 4);
+        assert_eq!(raw_column_at(&offsets, 2), 2, "just past the end");
+        assert_eq!(raw_column_at(&offsets, 99), 2, "far past, same place");
+    }
+
+    #[test]
+    fn an_empty_line_resolves_to_its_only_position() {
+        let (_, offsets) = render_line_mapped("", 4);
+        assert_eq!(raw_column_at(&offsets, 0), 0);
+        assert_eq!(raw_column_at(&offsets, 7), 0);
+    }
+
+    #[test]
+    fn the_two_column_maps_are_inverses() {
+        for line in ["abc", "\tx", "a\tb\tc", "\u{3b1}\u{3b2}\u{3b3}", "\t\t"] {
+            let (_, offsets) = render_line_mapped(line, 4);
+            for raw in 0..line.chars().count() {
+                assert_eq!(
+                    raw_column_at(&offsets, offsets[raw]),
+                    raw,
+                    "{line:?} character {raw}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn the_column_map_tracks_tab_expansion() {

@@ -41,6 +41,7 @@ struct Palette {
     syn_punctuation: Color,
     syn_variable: Color,
     syn_attribute: Color,
+    select_bg: Color,
     ignored: Color,
     match_bg: Color,
     match_current_bg: Color,
@@ -74,6 +75,7 @@ impl Palette {
             syn_punctuation: theme.syn_punctuation.to_color(depth),
             syn_variable: theme.syn_variable.to_color(depth),
             syn_attribute: theme.syn_attribute.to_color(depth),
+            select_bg: theme.select_bg.to_color(depth),
             ignored: theme.ignored.to_color(depth),
             match_bg: theme.match_bg.to_color(depth),
             match_current_bg: theme.match_current_bg.to_color(depth),
@@ -143,9 +145,34 @@ fn role_color(role: dxdiary_syntax::Role, p: &Palette) -> Color {
 /// `spans` are in character offsets against the *untruncated* line, so the
 /// horizontal scroll window is applied here rather than by the caller — doing
 /// it beforehand would leave the offsets pointing at the wrong characters.
-/// Search matches on this line, as raw-character ranges plus whether each is
-/// the selected one.
-type Marks = [(usize, usize, bool)];
+/// Why a range of characters is shaded.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Shade {
+    /// A search hit that is not the one you are on.
+    Match,
+    /// The search hit the cursor is on.
+    CurrentMatch,
+    /// Text selected with the mouse.
+    Selection,
+}
+
+/// Shaded ranges on one line, as raw character offsets -- the same space
+/// syntax spans and search matches use, so all of them map through one column
+/// table.
+type Marks = [(usize, usize, Shade)];
+
+/// The part of a mouse selection that falls on `line`, if any.
+fn selection_on(app: &App, line: usize, len: usize) -> Option<(usize, usize)> {
+    let ((start_line, start_col), (end_line, end_col)) = app.selection()?;
+    if line < start_line || line > end_line {
+        return None;
+    }
+    let from = if line == start_line { start_col } else { 0 };
+    // A selection running on into the next line covers this one's newline,
+    // which reads as "to the end of the line".
+    let to = if line == end_line { end_col } else { len };
+    (from < to).then_some((from, to))
+}
 
 /// Everything one rendered line needs beyond its text.
 struct LineStyle<'a> {
@@ -192,14 +219,14 @@ fn highlighted_spans(text: &str, s: &LineStyle, p: &Palette) -> Vec<Span<'static
         }
     }
 
-    // Search matches paint the background, so they survive whatever the
-    // syntax colour does to the foreground.
+    // Shading paints the background, so it survives whatever the syntax
+    // colour does to the foreground.
     let mut backs: Vec<Option<Color>> = vec![None; chars.len()];
-    for &(start, stop, current) in marks {
-        let color = if current {
-            p.match_current_bg
-        } else {
-            p.match_bg
+    for &(start, stop, shade) in marks {
+        let color = match shade {
+            Shade::Match => p.match_bg,
+            Shade::CurrentMatch => p.match_current_bg,
+            Shade::Selection => p.select_bg,
         };
         for slot in backs
             .iter_mut()
@@ -713,11 +740,27 @@ pub(crate) fn render_content(f: &mut Frame, area: Rect, app: &App, hits: &mut Hi
                     spans.push(number);
                     // One path whether or not the file has a language: an
                     // unhighlighted file still has to show search matches.
-                    let marks: Vec<(usize, usize, bool)> = app
+                    let mut marks: Vec<(usize, usize, Shade)> = app
                         .search
                         .as_ref()
-                        .map(|s| s.on_line(n).map(|(m, cur)| (m.start, m.end, cur)).collect())
+                        .map(|s| {
+                            s.on_line(n)
+                                .map(|(m, cur)| {
+                                    let shade = if cur {
+                                        Shade::CurrentMatch
+                                    } else {
+                                        Shade::Match
+                                    };
+                                    (m.start, m.end, shade)
+                                })
+                                .collect()
+                        })
                         .unwrap_or_default();
+                    // Pushed last so it paints over a search hit underneath:
+                    // what you just selected is what you are looking at.
+                    if let Some((from, to)) = selection_on(app, n, raw.chars().count()) {
+                        marks.push((from, to, Shade::Selection));
+                    }
                     let empty: Vec<dxdiary_syntax::Span> = Vec::new();
                     spans.extend(highlighted_spans(
                         &expanded,

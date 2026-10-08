@@ -2395,3 +2395,335 @@ fn a_negated_rule_is_not_greyed() {
     assert!(app.is_ignored(&root.join("drop.log")));
     assert!(!app.is_ignored(&root.join("keep.log")));
 }
+
+// ------------------------------------------------- click to edit, select
+
+/// Absolute screen position of `needle`, plus `offset` characters.
+///
+/// Found on a rendered frame rather than computed, so the test clicks where
+/// the character actually is instead of agreeing with the layout code about
+/// where it ought to be.
+fn pos_of(app: &mut App, needle: &str, offset: u16) -> (u16, u16) {
+    let mut term = Terminal::new(TestBackend::new(90, 20)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    let buf = term.backend().buffer();
+    for y in 0..buf.area.height {
+        let text: String = (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol())
+            .collect::<Vec<_>>()
+            .join("");
+        if let Some(byte) = text.find(needle) {
+            let col = text[..byte].chars().count() as u16;
+            return (col + offset, y);
+        }
+    }
+    panic!("no row containing {needle:?}");
+}
+
+fn press_at(app: &mut App, pos: (u16, u16)) -> bool {
+    drag(app, MouseEventKind::Down(MouseButton::Left), pos.0, pos.1)
+}
+
+#[test]
+fn clicking_the_text_starts_editing_there() {
+    let mut app = find_app("click-edit", "fn alpha() {}\nfn beta() {}\n");
+    assert_eq!(app.mode, dxdiary_tui::Mode::Normal);
+
+    // Click on the `l` of alpha, four characters in.
+    let pos = pos_of(&mut app, "fn alpha", 4);
+    press_at(&mut app, pos);
+
+    assert_eq!(app.mode, dxdiary_tui::Mode::Insert, "{}", app.status);
+    let cursor = app.buffer.as_ref().unwrap().cursor;
+    assert_eq!((cursor.line, cursor.column), (0, 4));
+}
+
+#[test]
+fn typing_after_a_click_lands_where_it_was_clicked() {
+    let mut app = find_app("click-type", "fn alpha() {}\n");
+    let pos = pos_of(&mut app, "fn alpha", 3);
+    press_at(&mut app, pos);
+    typed(&mut app, "X");
+    assert_eq!(app.buffer.as_ref().unwrap().line(0), "fn Xalpha() {}");
+}
+
+#[test]
+fn clicking_a_later_line_moves_the_caret_to_it() {
+    let mut app = find_app("click-line", "one\ntwo\nthree\n");
+    let pos = pos_of(&mut app, "three", 2);
+    press_at(&mut app, pos);
+    let cursor = app.buffer.as_ref().unwrap().cursor;
+    assert_eq!((cursor.line, cursor.column), (2, 2));
+}
+
+#[test]
+fn clicking_past_the_end_of_a_line_lands_at_its_end() {
+    let mut app = find_app("click-past", "ab\n");
+    let (col, row) = pos_of(&mut app, "ab", 0);
+    drag(
+        &mut app,
+        MouseEventKind::Down(MouseButton::Left),
+        col + 40,
+        row,
+    );
+    assert_eq!(app.buffer.as_ref().unwrap().cursor.column, 2);
+}
+
+#[test]
+fn clicking_a_tab_indented_line_accounts_for_the_expansion() {
+    // The click arrives in display columns and the cursor lives in character
+    // offsets; a tab makes those differ by three.
+    let mut app = find_app("click-tab", "\talpha\n");
+    let pos = pos_of(&mut app, "alpha", 0);
+    press_at(&mut app, pos);
+    assert_eq!(
+        app.buffer.as_ref().unwrap().cursor.column,
+        1,
+        "the `a` is character 1, after the tab"
+    );
+}
+
+#[test]
+fn clicking_a_diff_does_not_start_editing_it() {
+    // Switching views out from under the click would be a surprising thing
+    // for a click to do, and a diff is not a thing you can type into.
+    let mut app = diff_app("click-diff");
+    assert_eq!(app.view, dxdiary_tui::ContentView::Diff);
+    let pos = pos_of(&mut app, "CHANGED", 2);
+    press_at(&mut app, pos);
+
+    assert_eq!(app.mode, dxdiary_tui::Mode::Normal, "{}", app.status);
+    assert_eq!(app.view, dxdiary_tui::ContentView::Diff, "still the diff");
+}
+
+#[test]
+fn i_still_enters_insert_from_the_keyboard() {
+    let mut app = find_app("click-i", "abc\n");
+    key(&mut app, KeyCode::Char('i'));
+    assert_eq!(app.mode, dxdiary_tui::Mode::Insert);
+}
+
+// ------------------------------------------------------------- selection
+
+#[test]
+fn dragging_across_text_selects_it() {
+    let mut app = find_app("sel-drag", "fn alpha() {}\n");
+    let start = pos_of(&mut app, "fn alpha", 3);
+    press_at(&mut app, start);
+    drag(
+        &mut app,
+        MouseEventKind::Drag(MouseButton::Left),
+        start.0 + 5,
+        start.1,
+    );
+    drag(
+        &mut app,
+        MouseEventKind::Up(MouseButton::Left),
+        start.0 + 5,
+        start.1,
+    );
+
+    assert_eq!(app.selected_text().as_deref(), Some("alpha"));
+}
+
+#[test]
+fn a_selection_can_run_across_lines() {
+    let mut app = find_app("sel-multi", "one\ntwo\nthree\n");
+    let start = pos_of(&mut app, "one", 1);
+    let end = pos_of(&mut app, "two", 2);
+    press_at(&mut app, start);
+    drag(
+        &mut app,
+        MouseEventKind::Drag(MouseButton::Left),
+        end.0,
+        end.1,
+    );
+    drag(
+        &mut app,
+        MouseEventKind::Up(MouseButton::Left),
+        end.0,
+        end.1,
+    );
+
+    assert_eq!(app.selected_text().as_deref(), Some("ne\ntw"));
+}
+
+#[test]
+fn dragging_backwards_selects_the_same_text() {
+    let mut app = find_app("sel-back", "abcdef\n");
+    let start = pos_of(&mut app, "abcdef", 5);
+    press_at(&mut app, start);
+    drag(
+        &mut app,
+        MouseEventKind::Drag(MouseButton::Left),
+        start.0 - 3,
+        start.1,
+    );
+    drag(
+        &mut app,
+        MouseEventKind::Up(MouseButton::Left),
+        start.0 - 3,
+        start.1,
+    );
+    assert_eq!(app.selected_text().as_deref(), Some("cde"));
+}
+
+#[test]
+fn a_click_with_no_drag_selects_nothing() {
+    let mut app = find_app("sel-none", "abcdef\n");
+    let pos = pos_of(&mut app, "abcdef", 2);
+    press_at(&mut app, pos);
+    drag(
+        &mut app,
+        MouseEventKind::Up(MouseButton::Left),
+        pos.0,
+        pos.1,
+    );
+    assert_eq!(app.selected_text(), None, "a caret is not a selection");
+}
+
+#[test]
+fn the_selection_is_shaded_on_screen() {
+    let mut app = find_app("sel-shade", "fn alpha() {}\n");
+    let start = pos_of(&mut app, "fn alpha", 3);
+    press_at(&mut app, start);
+    drag(
+        &mut app,
+        MouseEventKind::Drag(MouseButton::Left),
+        start.0 + 5,
+        start.1,
+    );
+
+    let mut term = Terminal::new(TestBackend::new(90, 20)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    let buf = term.backend().buffer();
+    let inside = buf[(start.0, start.1)].bg;
+    let outside = buf[(start.0 - 1, start.1)].bg;
+    assert_ne!(inside, outside, "selected text reads differently");
+}
+
+#[test]
+fn esc_clears_the_selection_before_leaving_insert() {
+    let mut app = find_app("sel-esc", "abcdef\n");
+    let start = pos_of(&mut app, "abcdef", 1);
+    press_at(&mut app, start);
+    drag(
+        &mut app,
+        MouseEventKind::Drag(MouseButton::Left),
+        start.0 + 3,
+        start.1,
+    );
+    drag(
+        &mut app,
+        MouseEventKind::Up(MouseButton::Left),
+        start.0 + 3,
+        start.1,
+    );
+    assert!(app.selected_text().is_some());
+
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.selected_text(), None, "the selection went");
+    assert_eq!(app.mode, dxdiary_tui::Mode::Insert, "but not the mode");
+
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.mode, dxdiary_tui::Mode::Normal);
+}
+
+#[test]
+fn typing_drops_the_selection() {
+    let mut app = find_app("sel-type", "abcdef\n");
+    let start = pos_of(&mut app, "abcdef", 1);
+    press_at(&mut app, start);
+    drag(
+        &mut app,
+        MouseEventKind::Drag(MouseButton::Left),
+        start.0 + 3,
+        start.1,
+    );
+    drag(
+        &mut app,
+        MouseEventKind::Up(MouseButton::Left),
+        start.0 + 3,
+        start.1,
+    );
+
+    typed(&mut app, "X");
+    assert_eq!(app.selected_text(), None);
+}
+
+#[test]
+fn ctrl_c_copies_a_selection_instead_of_quitting() {
+    // The footgun this avoids: click to edit, type, select, reach for the
+    // copy shortcut and lose the session along with the edit.
+    let mut app = find_app("sel-copy", "abcdef\n");
+    let start = pos_of(&mut app, "abcdef", 1);
+    press_at(&mut app, start);
+    drag(
+        &mut app,
+        MouseEventKind::Drag(MouseButton::Left),
+        start.0 + 3,
+        start.1,
+    );
+    drag(
+        &mut app,
+        MouseEventKind::Up(MouseButton::Left),
+        start.0 + 3,
+        start.1,
+    );
+
+    ctrl(&mut app, 'c');
+    assert!(!app.quit, "it copied rather than quitting");
+    assert!(app.status.contains("clipboard"), "{}", app.status);
+    assert_eq!(app.selected_text(), None, "and the selection was consumed");
+}
+
+#[test]
+fn ctrl_c_still_quits_when_nothing_is_selected() {
+    // The escape hatch has to survive: a runaway session is never one where
+    // you have just selected something.
+    let mut app = find_app("sel-quit", "abcdef\n");
+    key(&mut app, KeyCode::Char('i'));
+    ctrl(&mut app, 'c');
+    assert!(app.quit);
+}
+
+#[test]
+fn copying_nothing_says_how_to_select() {
+    let mut app = find_app("sel-empty", "abcdef\n");
+    key(&mut app, KeyCode::Char('y'));
+    assert!(app.status.contains("drag"), "{}", app.status);
+}
+
+#[test]
+fn saving_leaves_you_in_the_text_you_were_editing() {
+    // load_diff used to pick the view, and save recomputes the diff, so every
+    // ctrl-s threw you out of the file and into the diff of it. Landing on a
+    // diff is something opening a file does, not something saving does.
+    let mut app = diff_app("save-view");
+    key(&mut app, KeyCode::Char('d')); // diff -> file
+    assert_eq!(app.view, dxdiary_tui::ContentView::File);
+
+    key(&mut app, KeyCode::Char('i'));
+    typed(&mut app, "X");
+    ctrl(&mut app, 's');
+
+    assert!(!app.is_dirty(), "{}", app.status);
+    assert_eq!(
+        app.view,
+        dxdiary_tui::ContentView::File,
+        "still looking at the file: {}",
+        app.status
+    );
+    assert!(
+        app.status.contains("wrote"),
+        "and it said so: {}",
+        app.status
+    );
+}
+
+#[test]
+fn opening_a_changed_file_still_lands_on_its_diff() {
+    // The behaviour that moved, rather than went.
+    let app = diff_app("open-view");
+    assert_eq!(app.view, dxdiary_tui::ContentView::Diff);
+}

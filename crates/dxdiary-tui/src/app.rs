@@ -176,6 +176,11 @@ pub struct App {
     width_pinned: bool,
     /// A divider drag is in progress.
     dragging: bool,
+    /// Where a text selection was started, as (line, raw column). The other
+    /// end is wherever the cursor is now, so moving the cursor extends it.
+    anchor: Option<(usize, usize)>,
+    /// True while a selection drag is in progress.
+    selecting: bool,
     /// Width of the whole body as of the last frame, so a drag can turn a
     /// column into a percentage. Only render knows it.
     body_w: u16,
@@ -259,6 +264,8 @@ impl App {
             tree_percent,
             width_pinned: false,
             dragging: false,
+            anchor: None,
+            selecting: false,
             body_w: 0,
             highlighter: dxdiary_syntax::Highlighter::new(),
             language: None,
@@ -490,6 +497,13 @@ impl App {
         // Ctrl+C quits from any mode; checked before insert so a runaway
         // session is always escapable.
         if k.modifiers.contains(KeyModifiers::CONTROL) && matches!(k.code, KeyCode::Char('c')) {
+            // With something selected this is a copy, as it is everywhere
+            // else. With nothing selected it stays the unconditional way out
+            // of a runaway session, which is what it has always been -- and a
+            // runaway session is never one where you just selected something.
+            if self.anchor.is_some() {
+                return self.copy_selection();
+            }
             self.quit = true;
             return true;
         }
@@ -512,6 +526,12 @@ impl App {
         };
 
         match k.code {
+            KeyCode::Esc if self.anchor.is_some() => {
+                // Dismiss in the order things appeared: the selection is the
+                // most recent thing on screen, so it goes first.
+                self.anchor = None;
+                self.status = "selection cleared".into();
+            }
             KeyCode::Esc => {
                 self.mode = Mode::Normal;
                 self.status = "normal".into();
@@ -544,7 +564,14 @@ impl App {
     /// Keep the view, highlighting, and the language server in step with an
     /// edit. Re-highlighting the whole file per keystroke is fine at terminal
     /// sizes and avoids an incremental-parse cache that could go stale.
+    /// Typing replaces a selection in every editor; here it only drops it,
+    /// since deleting a range is a separate change this does not make yet.
+    fn drop_selection(&mut self) {
+        self.anchor = None;
+    }
+
     fn sync_after_edit(&mut self) {
+        self.drop_selection();
         let Some(buf) = &self.buffer else { return };
         self.doc_line = buf.cursor.line;
 
@@ -574,12 +601,15 @@ impl App {
         match buf.save() {
             Ok(()) => {
                 let path = buf.path.clone();
-                self.status = format!("wrote {}", path.display());
                 // The file changed on disk, so git status and the diff are
                 // both stale.
                 self.refresh_git();
                 self.load_diff(&path);
                 self.notify_lsp_save(&path);
+                // Last: load_diff writes its own summary to the status line,
+                // which used to swallow this the instant it was set, leaving
+                // a save with no visible confirmation at all.
+                self.status = format!("wrote {}", path.display());
             }
             Err(e) => self.status = format!("save failed: {e}"),
         }
@@ -648,6 +678,7 @@ impl App {
             }
             KeyCode::Char('/') => self.begin_prompt(Asking::Search),
             KeyCode::Char('*') => self.begin_prompt(Asking::Grep),
+            KeyCode::Char('y') => self.copy_selection(),
             KeyCode::Char('<') => self.nudge_split(-5),
             KeyCode::Char('>') => self.nudge_split(5),
             KeyCode::Char(':') => self.begin_prompt(Asking::Goto),
@@ -773,9 +804,15 @@ impl App {
             MouseEventKind::Drag(MouseButton::Left) if self.dragging => {
                 self.set_split(m.column, self.body_w)
             }
+            // Dragging from inside the text selects it, which is the only
+            // thing a drag there could reasonably mean.
+            MouseEventKind::Drag(MouseButton::Left) if self.selecting => {
+                self.drag_selection(m.column, m.row)
+            }
             MouseEventKind::Up(MouseButton::Left) => {
-                let was = self.dragging;
+                let was = self.dragging || self.selecting;
                 self.dragging = false;
+                self.selecting = false;
                 was
             }
             MouseEventKind::ScrollDown => self.scroll_at(m.column, m.row, 3),
@@ -826,9 +863,44 @@ impl App {
                 self.focus = PaneId::Content;
                 let line = self.doc_scroll_y + hit.local_row as usize;
                 self.doc_line = line.min(self.content_rows().saturating_sub(1));
-                true
+
+                // A diff is not editable, so a click there is only a focus and
+                // a line. Switching views out from under the click would be a
+                // surprising thing for a click to do.
+                if self.view == ContentView::Diff || self.buffer.is_none() {
+                    return true;
+                }
+
+                let column = self.column_at(hit.local_col);
+                if let Some(buf) = &mut self.buffer {
+                    let line = self.doc_line;
+                    buf.move_to(line, column);
+                }
+                // Click to type, as every other editor works. `i` still does
+                // it from the keyboard, and esc still leaves.
+                self.anchor = None;
+                self.selecting = true;
+                self.enter_insert()
             }
         }
+    }
+
+    /// Follow a selection drag to wherever the pointer is now.
+    fn drag_selection(&mut self, col: u16, row: u16) -> bool {
+        let Some(hit) = self.hits.resolve(col, row) else {
+            return false;
+        };
+        if hit.target != HitTarget::ContentBody {
+            // Dragging out of the pane holds the selection where it was,
+            // rather than snapping it somewhere arbitrary.
+            return false;
+        }
+        let line = (self.doc_scroll_y + hit.local_row as usize)
+            .min(self.text_line_count().saturating_sub(1));
+        // column_at reads the line the cursor is on, so move there first.
+        self.doc_line = line;
+        let column = self.column_at(hit.local_col);
+        self.extend_selection(line, column)
     }
 
     fn scroll_at(&mut self, col: u16, row: u16, delta: isize) -> bool {
@@ -924,6 +996,9 @@ impl App {
 
         self.highlight_doc(&path);
         self.load_diff(&path);
+        // Only here: opening a changed file shows what changed. Recomputing
+        // the diff for any other reason must not move you.
+        self.show_best_view();
         self.notify_lsp_open(&path);
 
         if self.show_blame {
@@ -969,23 +1044,35 @@ impl App {
     /// Opening a changed file lands on the diff, because that is what you came
     /// for; an unchanged file stays on the file view since there is nothing to
     /// show. `d` overrides either way.
+    /// Recompute the diff for `path` against the current baseline.
+    ///
+    /// Does not decide which view you are looking at. It used to, and since
+    /// `save` also recomputes, every ctrl-s threw you out of the text you
+    /// were editing and into the diff of it. Landing on a diff is a thing
+    /// *opening* a file does; see [`Self::show_best_view`].
     fn load_diff(&mut self, path: &std::path::Path) {
         self.diff = self
             .vcs
             .as_ref()
             .and_then(|v| v.file_diff(path, &self.baseline).ok())
             .filter(|d| !d.is_empty() || d.binary);
-
-        self.view = if self.diff.is_some() {
-            ContentView::Diff
-        } else {
-            ContentView::File
-        };
         self.highlight_diff();
 
         if let Some(d) = &self.diff {
             self.status = format!("{} · {}", path.display(), d.summary());
         }
+    }
+
+    /// Show the diff when there is one, the file otherwise.
+    ///
+    /// What you want when a file first appears: a changed file is nearly
+    /// always opened to see what changed. Not what you want after a save.
+    fn show_best_view(&mut self) {
+        self.view = if self.diff.is_some() {
+            ContentView::Diff
+        } else {
+            ContentView::File
+        };
     }
 
     /// Toggle between the file and its diff (`d`).
@@ -2099,6 +2186,117 @@ impl App {
         } else {
             self.tree_percent
         }
+    }
+
+    /// Which character of the open line is under pane column `local_col`.
+    ///
+    /// Undoes everything the renderer put to the left of the text -- the blame
+    /// gutter, the severity column, the line number -- then the horizontal
+    /// scroll, then tab expansion. Getting any one of those wrong puts the
+    /// caret somewhere the user did not click.
+    fn column_at(&self, local_col: u16) -> usize {
+        let Some(buf) = &self.buffer else { return 0 };
+        let lines = buf.lines();
+        let Some(text) = lines.get(self.doc_line) else {
+            return 0;
+        };
+
+        let prefix = self.content_prefix_width();
+        let display = (local_col as usize).saturating_sub(prefix) + self.doc_scroll_x;
+        let (_, offsets) = dxdiary_core::document::render_line_mapped(text, self.config.tab_width);
+        dxdiary_core::document::raw_column_at(&offsets, display)
+    }
+
+    /// Columns the renderer uses before a line's text begins.
+    ///
+    /// One definition, shared with `content_text_width`, because a click and
+    /// the layout have to agree about where the text starts.
+    fn content_prefix_width(&self) -> usize {
+        let gutter = self.text_line_count().max(1).to_string().len().max(3);
+        let blame = if self.show_blame && self.blame.is_some() {
+            crate::panes::BLAME_WIDTH
+        } else {
+            0
+        };
+        // +1 for the severity column, +1 for the line number's trailing space.
+        blame + gutter + 2
+    }
+
+    /// Extend the selection to the cursor, starting one if needed.
+    fn extend_selection(&mut self, to_line: usize, to_col: usize) -> bool {
+        let Some(buf) = &mut self.buffer else {
+            return false;
+        };
+        if self.anchor.is_none() {
+            self.anchor = Some((buf.cursor.line, buf.cursor.column));
+        }
+        buf.move_to(to_line, to_col);
+        self.doc_line = to_line;
+        self.clamp_content();
+        true
+    }
+
+    /// The selection as an ordered pair, or `None` when it is empty.
+    ///
+    /// Public so the renderer can shade it.
+    pub fn selection(&self) -> Option<((usize, usize), (usize, usize))> {
+        let anchor = self.anchor?;
+        let buf = self.buffer.as_ref()?;
+        let head = (buf.cursor.line, buf.cursor.column);
+        if anchor == head {
+            return None;
+        }
+        Some(if anchor <= head {
+            (anchor, head)
+        } else {
+            (head, anchor)
+        })
+    }
+
+    /// Put the selection on the system clipboard (`ctrl-c`, or `y`).
+    fn copy_selection(&mut self) -> bool {
+        let Some(text) = self.selected_text() else {
+            self.status = "nothing selected · drag in the file to select".into();
+            return true;
+        };
+        self.status = match crate::clipboard::copy(&text) {
+            Ok(Some(bytes)) => {
+                self.anchor = None;
+                // "sent", not "copied": OSC 52 is a request, and a terminal
+                // with clipboard writes disabled will ignore it silently.
+                format!("sent {bytes} bytes to the clipboard")
+            }
+            Ok(None) => format!(
+                "selection is {} bytes; the clipboard limit is {}",
+                text.len(),
+                crate::clipboard::MAX_COPY_BYTES
+            ),
+            Err(e) => format!("copy failed: {e}"),
+        };
+        true
+    }
+
+    /// The selected text, for copying.
+    pub fn selected_text(&self) -> Option<String> {
+        let ((sl, sc), (el, ec)) = self.selection()?;
+        let lines = self.buffer.as_ref()?.lines();
+        let slice = |n: usize, from: usize, to: usize| -> String {
+            lines
+                .get(n)
+                .map(|l| l.chars().skip(from).take(to.saturating_sub(from)).collect())
+                .unwrap_or_default()
+        };
+        if sl == el {
+            return Some(slice(sl, sc, ec));
+        }
+        let mut out = slice(sl, sc, usize::MAX);
+        for n in (sl + 1)..el {
+            out.push('\n');
+            out.push_str(&lines.get(n).cloned().unwrap_or_default());
+        }
+        out.push('\n');
+        out.push_str(&slice(el, 0, ec));
+        Some(out)
     }
 
     /// Move the split to put the divider at column `col`.

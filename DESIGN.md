@@ -681,6 +681,38 @@ Negation (`!keep.log` after `*.log`) is the case a hand-rolled gitignore always 
 wrong, which is most of why this asks git rather than matching patterns itself. There
 is a test for it on both sides.
 
+### Phase 13 — click to edit, drag to select — **done**
+
+Clicking the text starts editing it, caret where the click landed. `i` still works; the
+click is a second door, not a replacement. A click maps backwards through everything
+the renderer put to its left -- blame gutter, severity column, line number -- then the
+horizontal scroll, then tab expansion, via the inverse of the column map phase 11
+added. Getting any one of those wrong puts the caret somewhere nobody clicked.
+
+A click on a diff does not start editing. Switching views out from under a click is a
+surprising thing for a click to do, and a diff is not a thing you can type into.
+
+Dragging selects, rendered as a third kind of shading. That turned the mark machinery's
+bool into a `Shade` enum -- a bool cannot mean three colours, and search matches,
+the current match and a selection are three.
+
+`ctrl-c` copies a selection and only quits when there is none. The footgun this closes
+is specific and new: before click-to-edit, reaching the editor took a deliberate `i`.
+Now a click does it, so "click, type, select, reach for copy" is a natural sequence
+that used to end in a lost session and a lost edit. A runaway session is never one
+where you have just selected something, so the escape hatch survives where it matters.
+
+Copying is OSC 52 -- asking the terminal to set the clipboard, the only method that
+works over SSH, where there is no display to talk to. The status says "sent", not
+"copied": a terminal with clipboard writes disabled ignores it silently and there is
+nothing to read back.
+
+**Two bugs the real-terminal harness found that the unit tests could not.** Saving
+flipped you into the diff view, because `load_diff` chose the view and `save`
+recomputes the diff; landing on a diff is something *opening* a file does. And the
+"wrote …" confirmation was overwritten by `load_diff`'s own summary in the same call,
+so a save had produced no visible feedback since editing landed in phase 7.
+
 ## 9. Risks
 
 | Risk | Severity | Status |
